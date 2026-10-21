@@ -9,8 +9,8 @@ The call pipeline runs in the fixed M6 order: frame, resolve, validate, classify
 the effective environment (phase 2), the decision record, execution, then the trailer or error
 and the completion record.
 
-The admin ops `unlock` and `lock` drive the store session (M7); `audit-tail` and `login-info`
-arrive in later steps.
+The admin ops `unlock` and `lock` drive the store session (M7); `audit-tail` streams the audit
+log (M9); `login-info` arrives in a later step.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from ..spi import (
     UpstreamFailure,
 )
 from .audit import AuditUnavailable, new_audit_id
+from .audit_tail import DEFAULT_N, MAX_N, AuditReadError, TailFilter, read_tail
 from .engine.explain import explain
 from .limits import Limits, MaxRowsRefused
 from .pins import PinError
@@ -648,6 +649,9 @@ class Dispatcher:
             )
             await self.refuse(conn, audit_id, refusal, fields)
             return
+        if request.op == "audit-tail":
+            await self._audit_tail(conn, request, audit_id)
+            return
         handler = self._admin_ops.get(request.op)
         if handler is None:
             refusal = Refused(
@@ -669,6 +673,54 @@ class Dispatcher:
             return
         with contextlib.suppress(ClientGone):
             await self._result(conn, data, started, record_id)
+
+    async def _audit_tail(self, conn: Connection, request: Request, audit_id: str) -> None:
+        """`audit tail` (M9): the last records, oldest first, one stored line per `text` frame,
+        after a second scrubber pass. Works while locked and is not itself audited."""
+        started = time.monotonic()
+        try:
+            flt, n = self._tail_args(request)
+            tail = await asyncio.to_thread(read_tail, self.b.config.audit_dir, flt, n)
+        except BadRequest as exc:
+            await self.refuse(conn, audit_id, Refused("bad_request", str(exc), record=None), {})
+            return
+        except AuditReadError as exc:
+            await self.refuse(conn, audit_id, Refused("internal", str(exc), record=None), {})
+            return
+        scrub = self.b.scrubber.call()
+        sent = 0
+        with contextlib.suppress(ClientGone):
+            for line in tail.lines:
+                text = scrub.error(line)
+                await conn.send({"t": "text", "stream": "audit", "data": text})
+                sent += len(text) + 1
+            await conn.send(
+                {
+                    "t": "trailer",
+                    "rows": len(tail.lines),
+                    "bytes": sent,
+                    "truncated": tail.truncated,
+                    "reason": "bytes" if tail.truncated else None,
+                    "durationMs": int((time.monotonic() - started) * 1000),
+                    "auditId": None,
+                    "scrubbed": scrub.count,
+                    "malformed": tail.malformed,
+                }
+            )
+
+    def _tail_args(self, request: Request) -> tuple[TailFilter, int]:
+        self._meta_args(request, ("target", "session", "client", "n"))
+        n = request.args.get("n", DEFAULT_N)
+        if type(n) is not int or not 1 <= n <= MAX_N:
+            raise BadRequest(
+                f"op audit-tail: n must be an integer from 1 to {MAX_N}, not {json.dumps(n)}"
+            )
+        flt = TailFilter(
+            target=self._str_arg(request, "target", required=False),
+            session=self._str_arg(request, "session", required=False),
+            client=self._str_arg(request, "client", required=False),
+        )
+        return flt, n
 
     async def _unlock(
         self, request: Request, audit_id: str, fields: Mapping[str, object]

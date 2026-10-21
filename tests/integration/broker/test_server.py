@@ -315,7 +315,7 @@ async def test_admin_ops_are_refused_on_agent_sock(env: BrokerEnv, broker: Broke
     assert result_data(await call(env.agent_socket, "status"))["state"] == "locked"
 
 
-@pytest.mark.parametrize("op", ["audit-tail", "login-info"])
+@pytest.mark.parametrize("op", ["login-info"])
 async def test_admin_ops_on_human_sock_have_no_handler_yet(
     env: BrokerEnv, broker: Broker, op: str
 ) -> None:

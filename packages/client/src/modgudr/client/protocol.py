@@ -102,7 +102,9 @@ def decode_value(type_name: str, value: object) -> object:
     return value
 
 
-def _frame_from(obj: Mapping[str, Any], columns: tuple[Column, ...] | None) -> Frame:
+def _frame_from(
+    obj: Mapping[str, Any], columns: tuple[Column, ...] | None, decode: bool = True
+) -> Frame:
     kind = obj.get("t")
     if kind == "header":
         raw = obj.get("columns")
@@ -122,6 +124,8 @@ def _frame_from(obj: Mapping[str, Any], columns: tuple[Column, ...] | None) -> F
         values = cast(list[object], cells)
         if len(values) != len(columns):
             raise Error("row frame does not match the header")
+        if not decode:
+            return Row(tuple(values))
         return Row(tuple(decode_value(c.type, v) for c, v in zip(columns, values, strict=True)))
     if kind == "text":
         return Text(str(obj.get("stream", "")), str(obj.get("data", "")))
@@ -132,8 +136,11 @@ def _frame_from(obj: Mapping[str, Any], columns: tuple[Column, ...] | None) -> F
     raise Error(f"unknown frame type {kind!r} from the broker")
 
 
-def read_frames(stream: BinaryIO) -> Iterator[Frame]:
+def read_frames(stream: BinaryIO, *, decode: bool = True) -> Iterator[Frame]:
     """Decode response frames from a socket file object, up to and including the trailer.
+
+    With `decode=False` the cells of a row stay as they are on the wire (strings, booleans, None),
+    which is what the CLI renders.
 
     An `error` frame raises the M5 exception. A stream that ends with neither trailer nor
     error raises `BrokerUnavailable`.
@@ -152,7 +159,7 @@ def read_frames(stream: BinaryIO) -> Iterator[Frame]:
         frame_obj: dict[str, Any] = obj  # pyright: ignore[reportUnknownVariableType]
         if frame_obj.get("t") == "error":
             raise error_from_frame(frame_obj)
-        frame = _frame_from(frame_obj, columns)
+        frame = _frame_from(frame_obj, columns, decode)
         if isinstance(frame, Header):
             columns = frame.columns
         yield frame

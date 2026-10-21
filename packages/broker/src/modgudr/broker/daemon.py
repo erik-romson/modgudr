@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import NoReturn, TextIO
 
 from .app import Broker, BrokerConfig, build
+from .policy.lint import lint_main
+from .registry import PluginError, PluginRegistry
 from .server import StartError
 
 EXIT_OK = 0
@@ -37,7 +39,8 @@ class _Parser(argparse.ArgumentParser):
 def _parser() -> argparse.ArgumentParser:
     parser = _Parser(
         prog="modgudr-broker",
-        description="The modgudr broker: serves agent.sock and human.sock.",
+        description="The modgudr broker: serves agent.sock and human.sock. "
+        "`modgudr-broker lint [--policy-dir DIR]` checks the policy offline.",
     )
     parser.add_argument(
         "--dev",
@@ -78,9 +81,22 @@ async def run(
     return EXIT_OK
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _lint(words: Sequence[str]) -> int:
+    """`modgudr-broker lint [--policy-dir DIR]`: the offline lint of step 03."""
     try:
-        args = _parser().parse_args(argv)
+        registry = PluginRegistry.discover()
+    except PluginError as exc:
+        print(f"modgudr-broker: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+    return lint_main(words, registry)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    words = list(sys.argv[1:] if argv is None else argv)
+    if words and words[0] == "lint":
+        return _lint(words[1:])
+    try:
+        args = _parser().parse_args(words)
     except _UsageError as exc:
         print(f"modgudr-broker: {exc}", file=sys.stderr)
         _parser().print_usage(sys.stderr)
