@@ -1,0 +1,39 @@
+# Example company policy (hosts and users are example data only).
+store:
+  default: file
+defaults:
+  env: test
+  timeout: 30s
+  maxRows: 500
+  maxRowsHard: 50000
+  maxBytes: 2MiB
+  maxRequestBytes: 1MiB
+  maxConcurrent: 4
+  breaker: { denials: 10, within: 5m }
+  idleLock: 1h
+  absoluteLock: 10h
+guard:
+  forbid: [sql:grant, sql:user.*]
+environments:
+  test:
+    aliases: [sol]
+    ceiling: destructive
+    sql:
+      allow: [write, delete]
+      deny: [truncate, ddl.drop]
+      constraints:
+        update: { requireWhere: true, maxAffectedRows: 1000 }
+        delete: { requireWhere: true, maxAffectedRows: 1000 }
+    kubectl:
+      allow: [read, rollout/restart, scale/*, delete/pods]
+      constraints:
+        "delete/*": { requireName: true }
+  stage:
+    aliases: [vfy]
+    ceiling: write
+    sql:
+      allow: [write]
+    kubectl:
+      allow: [read, rollout/restart]
+  prod:
+    ceiling: read

@@ -1,0 +1,54 @@
+targets:
+  cbsl-test:
+    system: cbsl
+    env: test
+    type: sql
+    dialect: oracle
+    host: db-test.example.net
+    port: 1521
+    sid: cbsltest
+    user: APP_RO
+    secret: file:cbsl-test
+    credential: { tier: dedicated }
+  cbsl-stage:
+    system: cbsl
+    env: stage
+    type: sql
+    dialect: oracle
+    host: db-stage.example.net
+    service: STAGESVC
+    user: APP_RO
+    secret: file:cbsl-stage
+    credential: { tier: custody }
+    maxRows: 200
+    columns:
+      mask: [EMAIL]
+    timeout: 20s
+    sql:
+      deny: [write]
+  cbsl-prod:
+    system: cbsl
+    env: prod
+    type: sql
+    dialect: oracle
+    host: db-prod.example.net
+    service: PRODSVC
+    user: APP_RO
+    secret: file:cbsl-prod
+    credential: { tier: dedicated }
+  sf:
+    system: sf
+    env: prod
+    type: sql
+    dialect: snowflake
+    host: acme-example.snowflakecomputing.com
+    user: APP_RO
+    secret: file:sf-key
+    credential: { tier: dedicated }
+  aks-test:
+    system: aks
+    env: sol
+    type: kubectl
+    cluster: { name: aks-sol }
+    provider: azure-cli
+    credential: { tier: borrowed }
