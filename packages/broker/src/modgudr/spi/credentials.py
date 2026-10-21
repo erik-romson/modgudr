@@ -36,6 +36,15 @@ class SecretRef:
 
 
 @dataclass(frozen=True)
+class PinEntry:
+    """A destination pin as a structured store holds it: `host[:port]`, and Bitwarden's URI match
+    type when the store has one. An entry with match type 5 ("never") is skipped (M8)."""
+
+    value: str
+    match: int | None = None
+
+
+@dataclass(frozen=True)
 class ResolvedSecret:
     """A secret value with the pins its store holds for it (§4.3, M8).
 
@@ -48,7 +57,7 @@ class ResolvedSecret:
     value: str = field(repr=False)
     note: str | None = None
     #: Raw `host[:port]` pins.
-    hosts: tuple[str, ...] = ()
+    hosts: tuple[str | PinEntry, ...] = ()
     #: Raw environment pins; more than one refuses the secret.
     env: tuple[str, ...] = ()
 

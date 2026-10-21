@@ -12,7 +12,14 @@ from .calls import (
     ResultSink,
     TypedParam,
 )
-from .credentials import Destination, MintedToken, ResolvedSecret, SecretRef, TokenRequest
+from .credentials import (
+    Destination,
+    MintedToken,
+    PinEntry,
+    ResolvedSecret,
+    SecretRef,
+    TokenRequest,
+)
 from .plugins import (
     AuthFailed,
     BindStyle,
@@ -25,7 +32,9 @@ from .plugins import (
     StoreContext,
     StoreError,
     StoreFactory,
+    StoreSessionInvalid,
     Target,
+    UnlockRefused,
     UpstreamFailure,
 )
 from .risk import CEILINGS, RISK_NAMES, Risk
@@ -70,6 +79,7 @@ __all__ = [
     "MintedToken",
     "OperationSpec",
     "ParamType",
+    "PinEntry",
     "ResolvedSecret",
     "ResultSink",
     "Risk",
@@ -83,9 +93,11 @@ __all__ = [
     "StoreContext",
     "StoreError",
     "StoreFactory",
+    "StoreSessionInvalid",
     "Target",
     "TokenRequest",
     "TypedParam",
+    "UnlockRefused",
     "UpstreamFailure",
     "pattern_matches",
 ]

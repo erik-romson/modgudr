@@ -5,8 +5,12 @@ request without one is a broker op: the metadata ops (both channels, never audit
 locked) or the admin ops (`human.sock` only).
 
 The call pipeline runs in the fixed M6 order: frame, resolve, validate, classify and decide
-(phase 1), the `maxConcurrent` slot, the lock gate, the secret (step 7), the decision record,
-execution, then the trailer or error and the completion record.
+(phase 1), the `maxConcurrent` slot, the lock gate, the secret and its pins with the decision in
+the effective environment (phase 2), the decision record, execution, then the trailer or error
+and the completion record.
+
+The admin ops `unlock` and `lock` drive the store session (M7); `audit-tail` and `login-info`
+arrive in later steps.
 """
 
 from __future__ import annotations
@@ -34,10 +38,13 @@ from ..spi import (
 from .audit import AuditUnavailable, new_audit_id
 from .engine.explain import explain
 from .limits import Limits, MaxRowsRefused
+from .pins import PinError
 from .policy.lint import lint_policy
 from .policy.resolve import Resolved, ResolveError, resolve_target
 from .scrub import CallScrubber
+from .secrets import CallScope, Latched, LoginFailed, SessionLocked, call_scope
 from .server import Channel
+from .session import LockReason
 from .sink import LimitedSink, LimitReached
 
 if TYPE_CHECKING:
@@ -96,6 +103,7 @@ class Refused(Exception):
         rule: str | None = None,
         retry_after: float | None = None,
         fields: Mapping[str, object] | None = None,
+        audited: bool = False,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -105,6 +113,8 @@ class Refused(Exception):
         self.rule = rule
         self.retry_after = retry_after
         self.fields: dict[str, object] = dict(fields or {})
+        #: The handler already wrote its record under the request's audit id.
+        self.audited = audited
 
 
 def encode_frame(frame: Mapping[str, object]) -> bytes:
@@ -454,6 +464,10 @@ def _classify(target: OpenTarget, call: Call) -> Action:
 
 
 MetaHandler = Callable[["Connection", Request], Awaitable[dict[str, object]]]
+#: An admin op: (request, audit id, record fields) -> (result data, the trailer's audit id).
+AdminHandler = Callable[
+    [Request, str, Mapping[str, object]], Awaitable[tuple[dict[str, object], str | None]]
+]
 
 
 class Dispatcher:
@@ -469,6 +483,10 @@ class Dispatcher:
             "actions": self._actions,
             "policy-show": self._policy_show,
             "policy-lint": self._policy_lint,
+        }
+        self._admin_ops: dict[str, AdminHandler] = {
+            "unlock": self._unlock,
+            "lock": self._lock,
         }
 
     async def serve(self, conn: Connection) -> None:
@@ -500,6 +518,8 @@ class Dispatcher:
         if line is None:
             return
         conn.phase = "working"
+        # Request entry: a passed idle or absolute deadline locks before anything else (M7).
+        await b.check_session()
         try:
             request = parse_request(line)
         except BadRequest as exc:
@@ -586,14 +606,20 @@ class Dispatcher:
             conn,
             refusal.code,
             refusal.message,
-            audit_id if refusal.record is not None else None,
+            audit_id if refusal.record is not None or refusal.audited else None,
             layer=refusal.layer,
             rule=refusal.rule,
             retry_after=refusal.retry_after,
             scrub=scrub,
         )
 
-    async def _result(self, conn: Connection, data: Mapping[str, object], started: float) -> None:
+    async def _result(
+        self,
+        conn: Connection,
+        data: Mapping[str, object],
+        started: float,
+        audit_id: str | None = None,
+    ) -> None:
         await conn.send({"t": "result", "data": data})
         await conn.send(
             {
@@ -603,7 +629,7 @@ class Dispatcher:
                 "truncated": False,
                 "reason": None,
                 "durationMs": int((time.monotonic() - started) * 1000),
-                "auditId": None,
+                "auditId": audit_id,
                 "scrubbed": 0,
             }
         )
@@ -622,12 +648,58 @@ class Dispatcher:
             )
             await self.refuse(conn, audit_id, refusal, fields)
             return
-        refusal = Refused(
-            "bad_request",
-            f"op {request.op!r} is not implemented in this version",
-            record="bad_request",
-        )
-        await self.refuse(conn, audit_id, refusal, fields)
+        handler = self._admin_ops.get(request.op)
+        if handler is None:
+            refusal = Refused(
+                "bad_request",
+                f"op {request.op!r} is not implemented in this version",
+                record="bad_request",
+            )
+            await self.refuse(conn, audit_id, refusal, fields)
+            return
+        started = time.monotonic()
+        try:
+            data, record_id = await handler(request, audit_id, fields)
+        except BadRequest as exc:
+            refusal = Refused("bad_request", str(exc), record="bad_request")
+            await self.refuse(conn, audit_id, refusal, fields)
+            return
+        except Refused as refusal:
+            await self.refuse(conn, audit_id, refusal, fields)
+            return
+        with contextlib.suppress(ClientGone):
+            await self._result(conn, data, started, record_id)
+
+    async def _unlock(
+        self, request: Request, audit_id: str, fields: Mapping[str, object]
+    ) -> tuple[dict[str, object], str | None]:
+        """Unlock the store session. The credential is never audited nor echoed; the `file`
+        store accepts any input, including none."""
+        self._meta_args(request, ("credential",))
+        credential = request.args.get("credential", "")
+        if not isinstance(credential, str):
+            raise BadRequest("op unlock: 'credential' must be a string")
+        outcome = await self.b.unlock(credential, audit_id, fields)
+        data: dict[str, object] = {
+            "state": "unlocked",
+            "alreadyUnlocked": outcome.already,
+            "reauthenticated": outcome.reauthenticated,
+        }
+        return data, audit_id
+
+    async def _lock(
+        self, request: Request, audit_id: str, fields: Mapping[str, object]
+    ) -> tuple[dict[str, object], str | None]:
+        """Lock now; returns at once with the number of calls it cancelled. Idempotent."""
+        self._meta_args(request, ())
+        outcome = await self.b.lock(LockReason.MANUAL, fields=fields)
+        data: dict[str, object] = {
+            "state": "locked",
+            "alreadyLocked": not outcome.locked,
+            "reason": str(self.b.session.reason) if self.b.session.reason else None,
+            "cancelled": outcome.cancelled,
+        }
+        return data, outcome.audit_id
 
     async def _broker_op(self, conn: Connection, request: Request, audit_id: str) -> None:
         handler = self._meta.get(request.op)
@@ -920,22 +992,11 @@ class Dispatcher:
     ) -> None:
         b = self.b
         # 6. The lock gate: broker-wide, every executing call needs UNLOCKED.
-        if not b.is_unlocked():
-            raise Refused("locked", LOCKED_MESSAGE, record="locked")
-        # 7. The secret: a pass-through to the store until the secret service exists (no pins,
-        # no cache). Phase 2 equals phase 1 here.
-        secret_ref = target.config.secret
-        if secret_ref is not None:
-            try:
-                await b.resolve_secret(secret_ref)
-            except StoreError as exc:
-                raise Refused(
-                    "upstream",
-                    f"secret {secret_ref} of target {target.config.name} cannot be resolved: {exc}",
-                    record="failed",
-                    fields={"stage": "secret"},
-                ) from None
-        fields["effectiveEnv"] = decision.env
+        epoch = b.session.epoch
+        if not b.session.unlocked:
+            raise Refused("locked", b.locked_message(), record="locked")
+        # 7. The secret and its pins, then the decision with the effective environment.
+        decision = await self._phase_two(target, decision, fields, epoch)
         # 8. The decision record. Without it nothing executes.
         try:
             await b.audit.recover()
@@ -947,7 +1008,65 @@ class Dispatcher:
                 record=None,
             ) from None
         # 9. and 10.
-        await Execution(self, conn, target, call, decision, limits, scrub, fields, started).run()
+        execution = Execution(
+            self, conn, target, call, decision, limits, scrub, fields, started, epoch
+        )
+        await execution.run()
+
+    async def _phase_two(
+        self, target: OpenTarget, decision: Decision, fields: dict[str, object], epoch: int
+    ) -> Decision:
+        """M6 step 7: resolve the secret and its pins, check the destination pin, apply the
+        environment pin and decide again (phase 2, final). A failure writes one record.
+
+        A `provider:` target has no stored secret and no pins: phase 2 equals phase 1, and
+        nothing is fetched here."""
+        b = self.b
+        name = target.config.name
+        secrets = target.secrets
+        if secrets is None:
+            fields["effectiveEnv"] = decision.env
+            return decision
+        ref = str(secrets.ref)
+        try:
+            pin = await secrets.check()
+        except SessionLocked:
+            raise Refused("locked", b.locked_message(), record="locked") from None
+        except StoreError as exc:
+            raise Refused(
+                "upstream",
+                f"secret {ref} of target {name} cannot be resolved: {exc}",
+                record="failed",
+                fields={"stage": "secret"},
+            ) from None
+        except PinError as exc:
+            raise Refused(
+                "denied",
+                exc.message,
+                record="denied",
+                layer="pinning",
+                rule=exc.rule,
+                fields={"decision": "deny", "stage": "secret"},
+            ) from None
+        if not b.session.is_current(epoch):
+            raise Refused("locked", b.locked_message(), record="locked")
+        fields["effectiveEnv"] = pin.env
+        if pin.pinned is not None:
+            fields["secretEnv"] = pin.pinned
+        if pin.env == decision.env:
+            return decision
+        final = b.decide(target, decision.action, pin.env)
+        fields.update(decision=final.verdict, layer=str(final.layer), rule=final.rule)
+        if not final.allowed:
+            raise Refused(
+                "denied",
+                f"{explain(final)} The environment is pinned to {pin.env} by the secret {ref}; "
+                f"target {name} declares {decision.env}.",
+                record="denied",
+                layer=str(final.layer),
+                rule=final.rule,
+            )
+        return final
 
 
 def _no_such_op(target: OpenTarget, op: str) -> str:
@@ -974,6 +1093,8 @@ class _Outcome:
     code: str | None = None
     message: str | None = None
     stage: str | None = None
+    layer: str | None = None
+    rule: str | None = None
 
 
 class Execution:
@@ -990,6 +1111,7 @@ class Execution:
         scrub: CallScrubber,
         fields: dict[str, object],
         started: float,
+        epoch: int,
     ) -> None:
         self.d = dispatcher
         self.b = dispatcher.b
@@ -1000,6 +1122,8 @@ class Execution:
         self.scrub = scrub
         self.fields = fields
         self.started = started
+        #: The session epoch the call passed the lock gate in.
+        self.epoch = epoch
         self.deadline = time.monotonic() + self.limits.timeout
         self.call = replace(call, deadline=self.deadline, constraints=decision.constraints)
         self.sink = LimitedSink(
@@ -1011,14 +1135,21 @@ class Execution:
             outcome = _Outcome(
                 "cancelled", "shutdown", "unavailable", "the broker is shutting down"
             )
+        elif not self.b.session.is_current(self.epoch):
+            # Locked while the decision record was written: nothing runs.
+            outcome = self._cancelled("lock")
         else:
             outcome = await self._execute()
         await self._respond(outcome)
 
     async def _execute(self) -> _Outcome:
-        task = asyncio.create_task(self.target.target.execute(self.call, self.sink))
+        # The connector's `Secrets.login` sees what this call was decided with.
+        with call_scope(CallScope(self.decision.env, self.epoch)):
+            task = asyncio.create_task(self.target.target.execute(self.call, self.sink))
         flight = Flight(self.call.audit_id, task)
         self.b.flights.add(flight)
+        session = self.b.session
+        session.call_started()
         watcher = asyncio.create_task(_watch_eof(self.conn.reader))
         try:
             remaining = max(0.0, self.deadline - time.monotonic())
@@ -1037,6 +1168,7 @@ class Execution:
             if not task.done():
                 task.cancel()
             self.b.flights.discard(flight)
+            session.call_finished()
 
     def _outcome(self, task: asyncio.Task[None], flight: Flight) -> _Outcome:
         if flight.reason is not None:
@@ -1052,8 +1184,18 @@ class Execution:
             return _Outcome("truncated")
         if isinstance(exc, TimeoutError):
             return self._cancelled("timeout")
+        if isinstance(exc, SessionLocked):
+            return self._cancelled("lock")
+        if isinstance(exc, PinError):
+            return _Outcome(
+                "failed", None, "denied", exc.message, "login", layer="pinning", rule=exc.rule
+            )
+        if isinstance(exc, StoreError):
+            return _Outcome("failed", None, "upstream", str(exc), "secret")
         if isinstance(exc, AuthFailed):
             return _Outcome("failed", None, "upstream", f"authentication failed: {exc}", "exec")
+        if isinstance(exc, LoginFailed | Latched):
+            return _Outcome("failed", None, "upstream", str(exc), exc.stage)
         if isinstance(exc, UpstreamFailure):
             return _Outcome("failed", None, "upstream", str(exc), "exec")
         return _Outcome(
@@ -1072,9 +1214,8 @@ class Execution:
             message = "the broker is shutting down; the call was cancelled"
             return _Outcome("cancelled", reason, "unavailable", message)
         if reason == "lock":
-            return _Outcome(
-                "cancelled", reason, "locked", f"the call was cancelled: {LOCKED_MESSAGE}"
-            )
+            message = f"the call was cancelled: {self.b.locked_message()}"
+            return _Outcome("cancelled", reason, "locked", message)
         return _Outcome("cancelled", reason)
 
     async def _finish(self) -> _Outcome:
@@ -1115,7 +1256,13 @@ class Execution:
                 outcome = self._cancelled("client")
         elif outcome.code is not None and message is not None:
             await self.d.send_error(
-                self.conn, outcome.code, message, self.call.audit_id, scrub=self.scrub
+                self.conn,
+                outcome.code,
+                message,
+                self.call.audit_id,
+                layer=outcome.layer,
+                rule=outcome.rule,
+                scrub=self.scrub,
             )
         if outcome.kind in ("failed", "cancelled") and outcome.cancelled != "client":
             log.warning(
@@ -1146,4 +1293,6 @@ class Execution:
         )
         if outcome.stage is not None:
             record["stage"] = outcome.stage
+        if outcome.layer is not None:
+            record.update(layer=outcome.layer, rule=outcome.rule)
         await self.b.audit.completion(self.call.audit_id, **record)

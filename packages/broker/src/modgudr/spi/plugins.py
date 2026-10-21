@@ -14,7 +14,13 @@ from typing import Literal, Protocol
 from pydantic import BaseModel
 
 from .calls import Call, OperationSpec, ResultSink, TypedParam
-from .credentials import Destination, MintedToken, ResolvedSecret, SecretRef, TokenRequest
+from .credentials import (
+    Destination,
+    MintedToken,
+    ResolvedSecret,
+    SecretRef,
+    TokenRequest,
+)
 from .risk import Risk
 from .rules import Action, ActionSpec, ConstraintCheck, Rule, RuleSet
 
@@ -52,6 +58,22 @@ class StoreConfigError(Exception):
     to start (exit 78)."""
 
 
+class UnlockRefused(Exception):
+    """Raised by a store's `unlock` when the credential is wrong (M7).
+
+    The broker records `unlock.failed` without the input and applies its failed-unlock limit. The
+    message must not contain the credential.
+    """
+
+
+class StoreSessionInvalid(Exception):
+    """Raised by a store whose session was rejected mid-session (a revoked or expired token).
+
+    The broker locks with reason `store-invalid` (M7), and the call ends `locked`, not
+    `upstream`.
+    """
+
+
 @dataclass(frozen=True)
 class StoreContext:
     """What a store factory gets at broker start."""
@@ -73,8 +95,15 @@ class Secrets(Protocol):
     async def login[T](self, connect: Callable[[ResolvedSecret], Awaitable[T]]) -> T:
         """Run `connect` with the target's secret, single-flight per target.
 
+        Only while a call executes: the secret handed to `connect` has passed the target's
+        destination and environment pins. `connect` opens a session or pool and returns it; it
+        raises `AuthFailed` when the server refuses the credential, and only then
+        (`final=True` for an account that is locked or expired).
+
         When `connect` raises `AuthFailed`, the service drops its cached value and refetches,
-        and retries once only if the value changed; otherwise the target is latched.
+        and retries once only if the value changed; otherwise the target is latched for five
+        minutes and later logins fail at once without calling `connect`. Exceptions raised by
+        `login` itself (a latched target, a pin refusal, a lock) must propagate unchanged.
         """
         ...
 
@@ -82,13 +111,23 @@ class Secrets(Protocol):
 class Target(Protocol):
     """One configured, open target. Owns pools or sessions."""
 
+    @property
+    def default_port(self) -> int:
+        """The port a destination pin without one means (M8): Oracle 1521, Snowflake 443,
+        Kubernetes 443."""
+        ...
+
     def destinations(self) -> frozenset[Destination]:
         """Every host:port the target will contact, for the destination pin (M8)."""
         ...
 
     async def execute(self, call: Call, sink: ResultSink) -> None: ...
 
-    async def aclose(self) -> None: ...
+    async def aclose(self) -> None:
+        """Close pools and sessions without waiting for work in flight. The broker calls it on
+        every lock (M7) and at shutdown, so it may run more than once; after a lock the target
+        opens again lazily, through `Secrets.login`, on its next call."""
+        ...
 
 
 class Connector(Protocol):
@@ -134,10 +173,14 @@ class SecretStore(Protocol):
     @property
     def scheme(self) -> str: ...
 
-    async def unlock(self, credential: str) -> None: ...
+    async def unlock(self, credential: str) -> None:
+        """Open a store session. Raises `UnlockRefused` for a wrong credential and
+        `StoreError` when the store cannot be reached."""
+        ...
 
     async def resolve(self, ref: SecretRef) -> ResolvedSecret:
-        """The value and the pins the store holds for it."""
+        """The value and the pins the store holds for it. Raises `StoreError` (`upstream`), or
+        `StoreSessionInvalid` when the store rejected its session."""
         ...
 
     async def lock(self) -> None: ...

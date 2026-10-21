@@ -35,6 +35,7 @@ from tests.support.brokerfx import (
     request,
     result_data,
     running,
+    unlock,
     wait_for,
     write_file,
     write_secrets,
@@ -277,7 +278,7 @@ async def test_reading_stops_at_limit_plus_one(env: BrokerEnv, broker: Broker) -
 
 
 async def test_a_silent_client_is_closed_after_ten_seconds(env: BrokerEnv, broker: Broker) -> None:
-    await broker.unlock_for_tests()
+    await unlock(env)
     reader, writer = await asyncio.open_unix_connection(os.fspath(env.agent_socket))
     started = time.monotonic()
     data = await asyncio.wait_for(reader.read(), timeout=20)
@@ -314,7 +315,7 @@ async def test_admin_ops_are_refused_on_agent_sock(env: BrokerEnv, broker: Broke
     assert result_data(await call(env.agent_socket, "status"))["state"] == "locked"
 
 
-@pytest.mark.parametrize("op", ["unlock", "lock", "audit-tail", "login-info"])
+@pytest.mark.parametrize("op", ["audit-tail", "login-info"])
 async def test_admin_ops_on_human_sock_have_no_handler_yet(
     env: BrokerEnv, broker: Broker, op: str
 ) -> None:
@@ -353,7 +354,7 @@ async def test_a_call_while_locked_is_locked_then_runs_after_unlock(
     assert records(env, "locked")[-1]["auditId"] == locked["auditId"]
     assert env.connector.targets["echo-test"].executed == []
 
-    await broker.unlock_for_tests()
+    await unlock(env)
     frames = await call(env.agent_socket, "echo", "echo-test", args={"text": "hi"}, client=client)
     assert [f["t"] for f in frames] == ["header", "row", "trailer"]
     assert frames[0]["columns"] == [{"name": "text", "type": "string"}]
@@ -404,7 +405,7 @@ async def test_denied_calls_are_refused_before_the_lock_gate(
 
 
 async def test_target_resolution(env: BrokerEnv, broker: Broker) -> None:
-    await broker.unlock_for_tests()
+    await unlock(env)
     sock = env.agent_socket
     await call(sock, "echo", "echo@prod", args={"text": "a"})
     assert records(env, "decision")[-1]["target"] == "echo-prod"
@@ -448,7 +449,7 @@ async def test_an_unknown_op_lists_the_targets_ops(env: BrokerEnv, broker: Broke
 
 
 async def test_max_rows_truncates_at_a_row_boundary(env: BrokerEnv, broker: Broker) -> None:
-    await broker.unlock_for_tests()
+    await unlock(env)
     frames = await call(
         env.agent_socket, "slow", "echo-test", args={"rows": 5, "delayMs": 0, "maxRows": 2}
     )
@@ -460,7 +461,7 @@ async def test_max_rows_truncates_at_a_row_boundary(env: BrokerEnv, broker: Brok
 
 
 async def test_writes_report_their_facts_in_the_trailer(env: BrokerEnv, broker: Broker) -> None:
-    await broker.unlock_for_tests()
+    await unlock(env)
     wet = (await call(env.agent_socket, "put", "echo-test", args={"value": "v"}))[-1]
     assert (wet["affectedRows"], wet["committed"]) == (1, True)
     dry = (await call(env.agent_socket, "put", "echo-test", args={"value": "v", "dryRun": True}))[
@@ -469,20 +470,24 @@ async def test_writes_report_their_facts_in_the_trailer(env: BrokerEnv, broker: 
     assert (dry["affectedRows"], dry["committed"], dry["dryRun"]) == (1, False, True)
 
 
-async def test_auth_failure_is_upstream_then_the_next_open_works(
+async def test_auth_failure_is_upstream_and_latches_the_target(
     env: BrokerEnv, broker: Broker
 ) -> None:
-    await broker.unlock_for_tests()
+    await unlock(env)
+    echo = env.connector.targets["echo-test"]
+    echo.rejected.add(SECRET)
     err = error(await call(env.agent_socket, "auth", "echo-test"))
     assert err["code"] == "upstream"
     assert "authentication failed" in str(err["message"])
-    assert records(env, "completion")[-1]["stage"] == "exec"
-    frames = await call(env.agent_socket, "auth", "echo-test")
-    assert frames[-1]["t"] == "trailer" and frames[1]["v"] == ["2"]
+    assert records(env, "completion")[-1]["stage"] == "login"
+    # M8: the value in the store is unchanged, so the target is latched.
+    again = error(await call(env.agent_socket, "auth", "echo-test"))
+    assert again["code"] == "upstream" and "latched" in str(again["message"])
+    assert echo.opens == 1
 
 
 async def test_a_missing_secret_is_upstream_with_one_record(env: BrokerEnv, broker: Broker) -> None:
-    await broker.unlock_for_tests()
+    await unlock(env)
     write_secrets(env.secrets_file, {"echo-prod": SECRETS["echo-prod"]})
     err = error(await call(env.agent_socket, "echo", "echo-test", args={"text": "a"}))
     assert err["code"] == "upstream"
@@ -496,7 +501,7 @@ async def test_leak_is_scrubbed_from_the_error_audit_and_log(
     env: BrokerEnv, broker: Broker, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.WARNING, logger="modgudr.broker")
-    await broker.unlock_for_tests()
+    await unlock(env)
     err = error(await call(env.agent_socket, "leak", "echo-test"))
     assert err["code"] == "upstream"
     assert SECRET not in json.dumps(err)
@@ -512,7 +517,7 @@ async def test_leak_is_scrubbed_from_the_error_audit_and_log(
 async def test_audit_degraded_refuses_new_calls_until_a_write_succeeds(
     env: BrokerEnv, broker: Broker
 ) -> None:
-    await broker.unlock_for_tests()
+    await unlock(env)
     sock = env.agent_socket
     task = asyncio.create_task(call(sock, "slow", "echo-test", args={"rows": 3, "delayMs": 200}))
     await wait_for(lambda: bool(records(env, "decision")))
@@ -544,7 +549,7 @@ async def test_max_concurrent_throttles_without_queueing_and_never_leaks(
 ) -> None:
     env = make_env(shortdir, targets=THROTTLE_TARGETS)
     async with running(env) as broker:
-        await broker.unlock_for_tests()
+        await unlock(env)
         sock = env.agent_socket
         slots = broker.targets["echo-test"].slots
         slow = [
@@ -585,7 +590,7 @@ async def test_max_concurrent_throttles_without_queueing_and_never_leaks(
 async def test_the_call_deadline_ends_with_partial_rows_then_timeout(
     env: BrokerEnv, broker: Broker
 ) -> None:
-    await broker.unlock_for_tests()
+    await unlock(env)
     started = time.monotonic()
     frames = await call(env.agent_socket, "slow", "echo-fast", args={"rows": 10, "delayMs": 300})
     assert time.monotonic() - started < 2.5
@@ -602,7 +607,7 @@ async def test_the_call_deadline_ends_with_partial_rows_then_timeout(
 
 
 async def test_a_client_that_closes_mid_call_cancels_it(env: BrokerEnv, broker: Broker) -> None:
-    await broker.unlock_for_tests()
+    await unlock(env)
     reader, writer = await asyncio.open_unix_connection(os.fspath(env.agent_socket))
     writer.write(line(request("slow", "echo-test", args={"rows": 50, "delayMs": 100})))
     await writer.drain()
@@ -628,8 +633,8 @@ async def test_a_client_that_closes_mid_call_cancels_it(env: BrokerEnv, broker: 
 async def test_scrub_is_partial_for_a_short_secret(shortdir: Path) -> None:
     short = {"echo-test": {"value": "abc123", "hosts": ["echo.example.net:7000"]}}
     env = make_env(shortdir, secrets={**SECRETS, **short})
-    async with running(env) as broker:
-        await broker.unlock_for_tests()
+    async with running(env):
+        await unlock(env)
         described = result_data(
             await call(env.agent_socket, "describe", args={"target": "echo-test"})
         )

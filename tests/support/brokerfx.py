@@ -15,6 +15,7 @@ import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -244,6 +245,16 @@ def error(frames: list[dict[str, object]]) -> dict[str, object]:
     return frames[-1]
 
 
+async def unlock(env: BrokerEnv, credential: str = "any input") -> dict[str, object]:
+    """Unlock over `human.sock`, as `modgudr unlock` does; the file store accepts any input."""
+    return result_data(await call(env.human_socket, "unlock", args={"credential": credential}))
+
+
+async def lock(env: BrokerEnv) -> dict[str, object]:
+    """Lock over `human.sock`, as `modgudr lock` does."""
+    return result_data(await call(env.human_socket, "lock"))
+
+
 def read_audit(directory: Path) -> list[dict[str, object]]:
     out: list[dict[str, object]] = []
     for path in sorted(directory.glob("audit-*.jsonl")):
@@ -260,6 +271,19 @@ async def wait_for(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():
             await asyncio.sleep(0.02)
+
+
+class FakeClock:
+    """A wall clock that tests move by hand: the M7 deadlines, the cache and the latch."""
+
+    def __init__(self, start: datetime | None = None) -> None:
+        self.now = start or datetime(2026, 10, 22, 8, 0, tzinfo=UTC)
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += timedelta(seconds=seconds)
 
 
 class RootFstat:

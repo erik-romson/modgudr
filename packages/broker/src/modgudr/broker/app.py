@@ -21,7 +21,7 @@ import logging
 import os
 import pwd
 import sys
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,10 +42,10 @@ from modgudr.client.errors import UsageError
 from ..spi import (
     Action,
     Connector,
+    CredentialProvider,
     Decision,
     Destination,
     OperationSpec,
-    ResolvedSecret,
     SecretRef,
     SecretStore,
     StoreConfigError,
@@ -53,23 +53,27 @@ from ..spi import (
     StoreError,
     StoreFactory,
     Target,
+    UnlockRefused,
 )
-from .audit import AuditUnavailable, AuditWriter
+from .audit import AuditUnavailable, AuditWriter, new_audit_id
 from .engine.decide import Scope, decide, scope_for
 from .limits import Limits, Slots, defaults_limits, effective_limits
 from .ops import (
+    LOCKED_MESSAGE,
     PROTOCOL_VERSIONS,
     UNKNOWN_LOCKED,
     ClientGone,
     Connection,
     Dispatcher,
     Flight,
+    Refused,
     Request,
 )
 from .policy.load import Policy, PolicyError, load_policy
 from .policy.model import TargetConfig
 from .registry import PluginError, PluginRegistry
 from .scrub import MIN_DATA_LENGTH, Scrubber
+from .secrets import SecretService, TargetSecrets
 from .server import (
     LOCK_FILE,
     Channel,
@@ -82,6 +86,7 @@ from .server import (
     peer_uid,
     release_lock,
 )
+from .session import FAILED_UNLOCK_LIMIT, FAILED_UNLOCK_WINDOW, LockReason, Session
 
 log = logging.getLogger("modgudr.broker")
 
@@ -182,6 +187,8 @@ class OpenTarget:
     slots: Slots
     destinations: tuple[Destination, ...]
     operations: Mapping[str, OperationSpec]
+    #: The target's view of the secret service; None for a `provider:` target.
+    secrets: TargetSecrets | None = None
     _scopes: dict[str, Scope] = field(default_factory=dict[str, Scope])
 
     def scope(self, policy: Policy, env: str) -> Scope:
@@ -194,17 +201,22 @@ class OpenTarget:
         return ",".join(str(d) for d in self.destinations)
 
 
-class PassThroughSecrets:
-    """M6 step 7 until the secret service exists: resolve through the store on every login, no
-    pins, no cache, and register the value with the scrubber."""
+@dataclass(frozen=True)
+class LockOutcome:
+    #: False when the broker was locked already (`lock` is idempotent).
+    locked: bool
+    #: In-flight calls this lock cancelled.
+    cancelled: int = 0
+    #: The `lock` record's audit id.
+    audit_id: str | None = None
 
-    def __init__(self, broker: Broker, ref: str) -> None:
-        self._broker = broker
-        self._ref = ref
 
-    async def login[T](self, connect: Callable[[ResolvedSecret], Awaitable[T]]) -> T:
-        secret = await self._broker.resolve_secret(self._ref)
-        return await connect(secret)
+@dataclass(frozen=True)
+class UnlockOutcome:
+    #: A concurrent `unlock` won while this one waited: nothing was tested.
+    already: bool = False
+    #: The broker was unlocked already and the store accepted the credential again.
+    reauthenticated: bool = False
 
 
 def build(config: BrokerConfig) -> Broker:
@@ -305,14 +317,20 @@ class Broker:
         self.flights: set[Flight] = set()
         self.stopping = False
         self.dispatcher = Dispatcher(self)
+        defaults = policy.company.defaults
+        self.session = Session(
+            clock=config.clock, idle_lock=defaults.idleLock, absolute_lock=defaults.absoluteLock
+        )
         self._store: SecretStore | None = None
+        self._secrets: SecretService | None = None
+        self._unlocking = asyncio.Lock()
+        self._locking: asyncio.Task[LockOutcome] | None = None
         self._servers: list[ChannelServer] = []
         self._lock_fd: int | None = None
         self._conns: dict[asyncio.Task[None], Connection] = {}
         self._watchdog: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
         self._shutdown_task: asyncio.Task[None] | None = None
-        self._secret_lengths: dict[str, int] = {}
         self._replaced_warned: set[Path] = set()
         self._facts: Facts | None = None
         self._isolation = Isolation("none", ("isolation not checked yet",))
@@ -326,6 +344,12 @@ class Broker:
         if self._store is None:
             raise RuntimeError("the broker has not started")
         return self._store
+
+    @property
+    def secrets(self) -> SecretService:
+        if self._secrets is None:
+            raise RuntimeError("the broker has not started")
+        return self._secrets
 
     @property
     def facts(self) -> Facts:
@@ -364,6 +388,12 @@ class Broker:
         check_socket_path(agent)
         check_socket_path(human)
         self._store = self._make_store(home)
+        self._secrets = SecretService(
+            self._store,
+            self.scrubber,
+            self.session,
+            on_store_invalid=lambda: self.begin_lock(LockReason.STORE_INVALID),
+        )
         # AUDIT_READY.
         try:
             await self.audit.start()
@@ -419,11 +449,21 @@ class Broker:
     async def _open_targets(self) -> None:
         for name, config in self.policy.targets.items():
             connector = cast("Connector", self.registry.connector_plugin(config.type))
-            secrets = PassThroughSecrets(self, config.secret) if config.secret else None
+            secrets: TargetSecrets | None = None
+            if config.secret is not None:
+                secrets = TargetSecrets(
+                    self.secrets,
+                    self.policy,
+                    target=name,
+                    declared_env=config.env,
+                    ref=SecretRef.parse(config.secret),
+                )
             try:
                 target = await connector.open(name, config.config, secrets)
             except Exception as exc:
                 raise StartError(f"target {name} cannot be opened: {exc}") from exc
+            if secrets is not None:
+                secrets.attach(target)
             limits = effective_limits(self.policy.company.defaults, config)
             self.targets[name] = OpenTarget(
                 config=config,
@@ -433,6 +473,7 @@ class Broker:
                 slots=Slots(limits.max_concurrent),
                 destinations=tuple(sorted(target.destinations(), key=str)),
                 operations={spec.name: spec for spec in connector.operations()},
+                secrets=secrets,
             )
 
     def _start_record(self) -> dict[str, object]:
@@ -512,21 +553,171 @@ class Broker:
                 await writer.wait_closed()
 
     def is_unlocked(self) -> bool:
-        return self.store.is_unlocked()
+        return self.session.unlocked
 
-    async def unlock_for_tests(self, credential: str = "test") -> None:
-        """Test-only seam until the real `unlock` exists (step 07). No socket reaches it."""
-        await self.store.unlock(credential)
+    def locked_message(self) -> str:
+        """What a call refused at the lock gate (or cancelled by a lock) is told."""
+        reason = self.session.reason
+        if reason is LockReason.STORE_INVALID:
+            return (
+                "the store session expired (store-invalid); run `modgudr unlock` in your own "
+                "terminal"
+            )
+        if reason is None:
+            return LOCKED_MESSAGE
+        return f"the broker is locked ({reason}); run `modgudr unlock` in your own terminal"
 
-    async def resolve_secret(self, ref_text: str) -> ResolvedSecret:
-        """Fetch a secret from the store and register it with the scrubber."""
-        ref = SecretRef.parse(ref_text)
-        secret = await self.store.resolve(ref)
-        if not secret.value:
-            raise StoreError(f"secret {ref} is empty")
-        self.scrubber.add(secret.value)
-        self._secret_lengths[str(ref)] = len(secret.value)
-        return secret
+    # --- the store session (M7) -------------------------------------------------------------
+
+    async def check_session(self) -> None:
+        """At every request entry and on the timer: lock when a deadline has passed."""
+        if self.stopping:
+            return
+        expiry = self.session.expiry()
+        if expiry is not None:
+            await self.lock(expiry.reason, detail=expiry.detail)
+
+    def begin_lock(
+        self,
+        reason: LockReason,
+        *,
+        detail: str | None = None,
+        fields: Mapping[str, object] | None = None,
+    ) -> asyncio.Task[LockOutcome] | None:
+        """Lock now. Before this returns, new calls get `locked` (1) and every in-flight call is
+        cancelled (2); a task closes pools and sessions (3), then drops the secret cache, minted
+        tokens, the store session and the scrubber's set (4), then writes the `lock` record.
+
+        Returns None when the broker was locked already."""
+        if not self.session.lock(reason):
+            return None
+        flights = list(self.flights)
+        for flight in flights:
+            flight.cancel("lock")
+        record: dict[str, object] = {**(fields or {}), "reason": str(reason)}
+        record["cancelled"] = len(flights)
+        if detail is not None:
+            record["detail"] = detail
+        task = asyncio.get_running_loop().create_task(self._finish_lock(len(flights), record))
+        self._locking = task
+        return task
+
+    async def lock(
+        self,
+        reason: LockReason,
+        *,
+        detail: str | None = None,
+        fields: Mapping[str, object] | None = None,
+    ) -> LockOutcome:
+        """`begin_lock`, then wait for its task. Idempotent."""
+        task = self.begin_lock(reason, detail=detail, fields=fields)
+        if task is None:
+            await self._lock_finished()
+            return LockOutcome(locked=False)
+        return await asyncio.shield(task)
+
+    async def _lock_finished(self) -> None:
+        pending = self._locking
+        if pending is not None and not pending.done():
+            await asyncio.shield(pending)
+
+    async def _finish_lock(self, cancelled: int, record: Mapping[str, object]) -> LockOutcome:
+        # 3. Pools and sessions close.
+        for target in list(self.targets.values()):
+            try:
+                await target.target.aclose()
+            except Exception as exc:
+                log.warning("target %s did not close: %s", target.config.name, type(exc).__name__)
+        # 4. The secret cache and latches, minted tokens, the store session, the scrubber's set.
+        self.secrets.drop()
+        for provider in self._providers():
+            try:
+                await provider.lock()
+            except Exception as exc:
+                log.warning("provider %s did not lock: %s", provider.name, type(exc).__name__)
+        try:
+            await self.store.lock()
+        except Exception as exc:
+            log.warning("the %s store did not lock: %s", self.store_scheme, type(exc).__name__)
+        self.scrubber.clear()
+        audit_id = new_audit_id()
+        await self.audit.event("lock", audit_id, **record)
+        return LockOutcome(locked=True, cancelled=cancelled, audit_id=audit_id)
+
+    def _providers(self) -> list[CredentialProvider]:
+        names = sorted({t.config.provider for t in self.targets.values() if t.config.provider})
+        return [p for p in (self.registry.provider(n) for n in names) if p is not None]
+
+    async def unlock(
+        self, credential: str, audit_id: str, fields: Mapping[str, object]
+    ) -> UnlockOutcome:
+        """`unlock` on `human.sock` (M7): serialised; every attempt is audited without its
+        input. Raises `Refused` (already audited under `audit_id`)."""
+        session = self.session
+        seen = session.unlocks
+        async with self._unlocking:
+            if session.unlocked and session.unlocks != seen:
+                await self.audit.event("unlock", audit_id, **fields, alreadyUnlocked=True)
+                return UnlockOutcome(already=True)
+            retry = session.unlock_retry_after()
+            if retry is not None:
+                await self.audit.event("unlock.throttled", audit_id, **fields, retryAfter=retry)
+                raise Refused(
+                    "throttled",
+                    f"{FAILED_UNLOCK_LIMIT} failed unlocks within {FAILED_UNLOCK_WINDOW:g} s; "
+                    f"the next attempt is refused untested for {retry:g} s",
+                    record=None,
+                    retry_after=retry,
+                    audited=True,
+                )
+            await self._lock_finished()
+            epoch = session.epoch
+            state = "unlocked" if session.unlocked else "locked"
+            try:
+                await self.store.unlock(credential)
+            except UnlockRefused as exc:
+                session.unlock_failed()
+                await self.audit.event("unlock.failed", audit_id, **fields, code="denied")
+                raise Refused(
+                    "denied",
+                    f"the {self.store_scheme} store refused the credential "
+                    f"({_withheld(exc, credential)}); the broker stays {state}",
+                    record=None,
+                    audited=True,
+                ) from None
+            except StoreError as exc:
+                await self.audit.event("unlock.failed", audit_id, **fields, code="upstream")
+                raise Refused(
+                    "upstream",
+                    f"the {self.store_scheme} store cannot be unlocked: "
+                    f"{_withheld(exc, credential)}",
+                    record=None,
+                    audited=True,
+                ) from None
+            except Exception as exc:
+                await self.audit.event("unlock.failed", audit_id, **fields, code="internal")
+                raise Refused(
+                    "internal",
+                    f"the {self.store_scheme} store failed to unlock ({type(exc).__name__})",
+                    record=None,
+                    audited=True,
+                ) from None
+            if session.epoch != epoch:
+                # A lock arrived while a re-authentication was running: it wins.
+                with contextlib.suppress(Exception):
+                    await self.store.lock()
+                await self.audit.event("unlock.failed", audit_id, **fields, code="locked")
+                raise Refused(
+                    "locked",
+                    "the broker was locked while the store was unlocking; run `modgudr unlock` "
+                    "again",
+                    record=None,
+                    audited=True,
+                )
+            again = session.unlocked_now()
+            self.secrets.on_unlock()
+            await self.audit.event("unlock", audit_id, **fields, reauthenticated=again)
+            return UnlockOutcome(reauthenticated=again)
 
     def decide(self, target: OpenTarget, action: Action, env: str) -> Decision:
         return decide(action, target.scope(self.policy, env))
@@ -547,7 +738,7 @@ class Broker:
             return "full"
         if not self.is_unlocked():
             return UNKNOWN_LOCKED
-        length = self._secret_lengths.get(str(SecretRef.parse(target.config.secret)))
+        length = self.secrets.length(SecretRef.parse(target.config.secret))
         if length is None:
             return "unknown (secret not resolved yet)"
         return "partial" if length < MIN_DATA_LENGTH else "full"
@@ -667,7 +858,8 @@ class Broker:
         return self._isolation
 
     async def _watch(self) -> None:
-        """Every few seconds: rebind a deleted socket file, and re-check isolation."""
+        """Every few seconds: rebind a deleted socket file, re-check isolation, and check the
+        session's deadlines (the timer of M7)."""
         while True:
             await asyncio.sleep(self.config.watchdog_interval)
             for server in self._servers:
@@ -686,6 +878,7 @@ class Broker:
                     self._replaced_warned.add(server.path)
                     self._warn(f"{server.path} was replaced by another file; not touching it")
             await self.check_isolation()
+            await self.check_session()
 
     # --- shutdown ---------------------------------------------------------------------------
 
@@ -699,7 +892,7 @@ class Broker:
 
     async def shutdown(self) -> None:
         """DRAINING -> STOPPED: in-flight calls end `cancelled: shutdown`, the sockets are
-        unlinked, then `broker.stop`."""
+        unlinked, an unlocked session locks (reason `shutdown`), then `broker.stop`."""
         if self.stopping:
             await self._stopped.wait()
             return
@@ -722,6 +915,10 @@ class Broker:
             server.unlink()
         for server in self._servers:
             await server.wait_closed(SHUTDOWN_GRACE)
+        task = self.begin_lock(LockReason.SHUTDOWN)
+        if task is not None:
+            await task
+        await self._lock_finished()
         await self._close_targets()
         if self._store is not None:
             with contextlib.suppress(Exception):
@@ -735,6 +932,14 @@ class Broker:
             self._lock_fd = None
         self._servers.clear()
         self._stopped.set()
+
+
+def _withheld(exc: Exception, credential: str) -> str:
+    """A store's message at unlock, unless it holds the input."""
+    text = str(exc)
+    if credential and credential in text:
+        return "its message held the input and is withheld"
+    return text
 
 
 def _file_sha256(path: Path) -> str | None:

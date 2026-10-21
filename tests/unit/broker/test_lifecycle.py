@@ -36,6 +36,7 @@ from tests.support.brokerfx import (
     request,
     result_data,
     running,
+    unlock,
     wait_for,
 )
 
@@ -268,13 +269,20 @@ async def test_an_unwritable_audit_dir_refuses_start(shortdir: Path) -> None:
 
 async def test_dev_mode_banner_and_stamps(shortdir: Path) -> None:
     env = make_env(shortdir)
-    async with running(env) as broker:
-        await broker.unlock_for_tests()
+    async with running(env):
+        await unlock(env)
         await call(env.agent_socket, "echo", "echo-test", args={"text": "x"})
         assert result_data(await call(env.agent_socket, "status"))["dev"] is True
     assert "DEV MODE" in env.stderr.getvalue()
     lines = read_audit(env.audit_dir)
-    assert len(lines) == 4
+    assert [r["type"] for r in lines] == [
+        "broker.start",
+        "unlock",
+        "decision",
+        "completion",
+        "lock",
+        "broker.stop",
+    ]
     assert {(r["dev"], r["store"], r["isolation"]) for r in lines} == {(True, "file", "none")}
 
 
@@ -308,8 +316,8 @@ async def test_sigterm_drains_in_flight_calls(shortdir: Path) -> None:
     env = make_env(shortdir)
     ready: asyncio.Future[Broker] = asyncio.get_running_loop().create_future()
     task = asyncio.create_task(daemon.run(env.config, on_ready=ready.set_result))
-    broker = await asyncio.wait_for(ready, 10)
-    await broker.unlock_for_tests()
+    await asyncio.wait_for(ready, 10)
+    await unlock(env)
     reader, writer = await asyncio.open_unix_connection(os.fspath(env.agent_socket))
     writer.write(line(request("slow", "echo-test", args={"rows": 100, "delayMs": 50})))
     await writer.drain()

@@ -1,7 +1,8 @@
 """A test-only connector, registered programmatically and never shipped.
 
 Ops: `echo` (read), `put` (write), `slow` (sleeps in steps, emitting rows), `boom` (raises),
-`leak` (an error containing the secret) and `auth` (an auth failure on the first open).
+`leak` (an error containing the secret) and `auth` (a login through the secret service, which the
+fake server refuses for the values in `EchoTarget.rejected`).
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from modgudr.spi import (
 )
 
 TYPE = "echo"
+#: The port a destination pin without one means for an echo target.
+DEFAULT_PORT = 7000
 
 _RISKS: Mapping[str, Risk] = {
     "echo": Risk.READ,
@@ -63,7 +66,7 @@ OPERATIONS = (
     ),
     OperationSpec("boom", "raise an exception"),
     OperationSpec("leak", "fail with an error that contains the secret"),
-    OperationSpec("auth", "log in; the first open of a target fails authentication"),
+    OperationSpec("auth", "log in; the fake server refuses the values in `rejected`"),
 )
 
 
@@ -71,7 +74,7 @@ class EchoConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     host: str = "echo.example.net"
-    port: int = 7000
+    port: int = DEFAULT_PORT
 
 
 class EchoTarget:
@@ -79,11 +82,21 @@ class EchoTarget:
         self.name = name
         self.config = config
         self.secrets = secrets
-        #: Logins through `secrets.login`, for the `auth` op.
+        #: Logins that reached the fake server (each `connect` of the `auth` op).
         self.opens = 0
+        #: Secret values the fake server refuses with `AuthFailed`.
+        self.rejected: set[str] = set()
+        #: Every login fails with `AuthFailed(final=True)`, like ORA-28000.
+        self.account_locked = False
+        #: Seconds each login takes, so that concurrent calls overlap.
+        self.login_delay = 0.0
         self.executed: list[str] = []
         self.cancelled: list[str] = []
         self.closed = False
+
+    @property
+    def default_port(self) -> int:
+        return DEFAULT_PORT
 
     def destinations(self) -> frozenset[Destination]:
         return frozenset({Destination(self.config.host, self.config.port)})
@@ -138,7 +151,10 @@ class EchoTarget:
 
         async def connect(secret: ResolvedSecret) -> str:
             self.opens += 1
-            if self.opens == 1:
+            await asyncio.sleep(self.login_delay)
+            if self.account_locked:
+                raise AuthFailed("ORA-28000: the account is locked", final=True)
+            if secret.value in self.rejected:
                 raise AuthFailed("invalid username or password")
             return "session"
 
