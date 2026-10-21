@@ -45,6 +45,12 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ANN", "PTH", "TID"]
 [tool.ruff.lint.isort]
 known-first-party = ["modgudr"]
 
+[tool.ruff.lint.per-file-ignores]
+# Pyright resolves an absolute `modgudr.<x>` import to the client's regular package
+# (`modgudr/__init__.py` with extend_path) even when `<x>` lives in another member, so inside the
+# broker distribution `modgudr.spi` and `modgudr.broker.*` are imported relatively.
+"packages/broker/src/**" = ["TID252"]
+
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"

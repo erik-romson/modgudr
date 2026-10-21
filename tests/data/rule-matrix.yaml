@@ -1,0 +1,704 @@
+# Rule resolution matrix for the engine (M11). Each row is a classified action, the target it runs
+# on and the expected decision with the layer and rule that decided it.
+#
+# `policy` holds every layer: plugin invariants and defaults, the global guard, environments
+# (ceiling and rule blocks, in the §5.5 shape) and targets (with their own rule blocks).
+# The rows start with every example of pre-plan §7.7 (`source: "7.7"`, `example` is the row
+# number in that table), then the layer-semantics rows of §13 (`source: "13"`, `topic`).
+#
+# Row keys:
+#   id, source, example | topic, call (what the caller sent; the engine never sees it)
+#   target              the target name
+#   env                 decide with this environment instead of the target's own (phase 2)
+#   action              name, risk, facts, invariantHits, detail: what the classifier returned
+#   measured            what the call measured while it ran (`affectedRows`); the row's
+#                       decision is then the one after the run, and the decision before it
+#                       must have been an allow
+#   expect              decision, layer, rule; optional constraints (name: {value, layer}) and
+#                       the exact explain text
+#   note                anything the row needs to say
+#
+# Hosts, accounts and users are example data only.
+
+policy:
+  plugins:
+    sql:
+      invariants:
+        - { rule: session, reason: "session state belongs to the broker's pooled connection" }
+        - { rule: transaction, reason: "the broker owns the transaction" }
+        - { rule: use, reason: "the target fixes database, schema, role and warehouse" }
+        - { rule: multi, reason: "one statement per call" }
+      defaults:
+        allow: [read]
+        constraints:
+          delete: { requireWhere: true }
+    kubectl:
+      invariants: []
+      defaults:
+        allow: [read]
+
+  guard: [sql:grant, sql:revoke, sql:user.*]
+
+  environments:
+    # §5.5 and §7.8.
+    prod:
+      ceiling: read
+      kubectl:
+        constraints:
+          "*": { namespaces: [app] }
+    stage:
+      aliases: [vfy]
+      ceiling: write
+      sql:
+        allow: [write]
+        constraints:
+          update: { requireWhere: true, maxAffectedRows: 100 }
+      kubectl:
+        allow: [read, rollout/restart]
+    test:
+      aliases: [sol]
+      ceiling: destructive
+      sql:
+        allow: [write, delete]
+        deny: [truncate, ddl.drop]
+        constraints:
+          update: { requireWhere: true, maxAffectedRows: 1000 }
+          delete: { requireWhere: true, maxAffectedRows: 1000 }
+      kubectl:
+        allow: [read, rollout/restart, scale/*, delete/pods, delete/jobs]
+        deny: [delete/namespaces, delete/persistentvolumeclaims]
+        constraints:
+          "*": { namespaces: [app-test, app-test-2] }
+          "delete/*": { requireName: true }
+    # The §13 rows add these.
+    lab:
+      # The widest ceiling, and an `all:` block that names every class: invariants, the guard,
+      # `unknown` and `secret` still refuse.
+      ceiling: admin
+      all: { allow: ["*", unknown, secret] }
+      sql: { allow: [session, grant] }
+    qa:
+      # Constraint merging: the plugin sets requireWhere, the environment maxAffectedRows.
+      ceiling: destructive
+      sql:
+        allow: [write, delete]
+        constraints:
+          delete: { maxAffectedRows: 1000 }
+    mixed:
+      # One layer with a connector block and an `all:` block.
+      ceiling: destructive
+      sql: { allow: [destructive] }
+      all: { deny: [truncate, delete/*] }
+    blind:
+      # An environment that takes away what the plugin defaults allow.
+      ceiling: read
+      sql: { deny: [read] }
+
+  targets:
+    # §5.5.
+    prod-ro: { type: sql, env: prod }
+    ora-vfy: { type: sql, env: prod }
+    pg-sol: { type: sql, env: test }
+    pg-sol-reporting:
+      type: sql
+      env: test
+      sql: { deny: [write, destructive] }
+    aks-test: { type: kubectl, env: test }
+    # The §13 rows add these.
+    lab-db:
+      type: sql
+      env: lab
+      sql: { allow: [grant, session] }
+    prod-writer:
+      type: sql
+      env: prod
+      sql: { allow: [write] }
+    pg-sol-cleanup:
+      type: sql
+      env: test
+      sql: { allow: [truncate] }
+    pg-sol-confused:
+      type: sql
+      env: test
+      sql: { allow: [delete], deny: [delete] }
+    stage-db: { type: sql, env: stage }
+    aks-stage: { type: kubectl, env: stage }
+    blind-db: { type: sql, env: blind }
+    qa-db: { type: sql, env: qa }
+    qa-small:
+      type: sql
+      env: qa
+      sql:
+        constraints:
+          delete: { maxAffectedRows: 100 }
+    mixed-db: { type: sql, env: mixed }
+    mixed-k8s:
+      type: kubectl
+      env: mixed
+      all: { allow: [write] }
+
+rows:
+  # ----------------------------------------------------------------------------------------------
+  # §7.7 worked examples
+  # ----------------------------------------------------------------------------------------------
+  - id: W01
+    source: "7.7"
+    example: 1
+    call: "select * from audit where action = 'delete'"
+    target: prod-ro
+    action: { name: sql:select, risk: read, facts: { tables: [audit] } }
+    expect:
+      decision: allow
+      layer: plugin-default
+      rule: read
+      explain: "allowed: sql:select (read) on prod-ro. The sql plugin defaults allow read (plugin-default)."
+
+  - id: W02
+    source: "7.7"
+    example: 2
+    call: "delete from po where id = 1"
+    target: prod-ro
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    expect:
+      decision: deny
+      layer: ceiling
+      rule: read
+      explain: "denied: sql:delete (destructive) on prod-ro. Environment prod allows read only (ceiling)."
+
+  - id: W03
+    source: "7.7"
+    example: 3
+    call: "delete from po where id = 1"
+    target: pg-sol
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    measured: { affectedRows: 1 }
+    expect:
+      decision: allow
+      layer: environment
+      rule: delete
+      constraints:
+        requireWhere: { value: true, layer: environment }
+        maxAffectedRows: { value: 1000, layer: environment }
+      explain: >-
+        allowed: sql:delete (destructive) on pg-sol. Environment test allows delete (environment);
+        subject to requireWhere true, maxAffectedRows 1000.
+    note: "1 row, committed"
+
+  - id: W04
+    source: "7.7"
+    example: 4
+    call: "delete from po"
+    target: pg-sol
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: none } }
+    expect:
+      decision: deny
+      layer: constraint
+      rule: requireWhere
+      explain: >-
+        denied: sql:delete (destructive) on pg-sol. Constraint requireWhere from environment test
+        is not met: the statement has no WHERE clause (constraint).
+
+  - id: W05
+    source: "7.7"
+    example: 5
+    call: "delete from po where status = 'X'"
+    target: pg-sol
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    measured: { affectedRows: 4200 }
+    expect:
+      decision: deny
+      layer: constraint
+      rule: maxAffectedRows
+      explain: >-
+        denied: sql:delete (destructive) on pg-sol. Constraint maxAffectedRows from environment
+        test is not met: 4200 rows, limit 1000 (constraint).
+    note: "allowed before the run; the count breaks the limit, so the call rolls back"
+
+  - id: W06
+    source: "7.7"
+    example: 6
+    call: "truncate table po"
+    target: pg-sol
+    action: { name: sql:truncate, risk: destructive, facts: { tables: [po] } }
+    expect: { decision: deny, layer: environment, rule: truncate }
+
+  - id: W07
+    source: "7.7"
+    example: 7
+    call: "delete from po where id = 1"
+    target: pg-sol-reporting
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    expect:
+      decision: deny
+      layer: target
+      rule: destructive
+      explain: >-
+        denied: sql:delete (destructive) on pg-sol-reporting. Target pg-sol-reporting denies
+        destructive (target).
+
+  - id: W08
+    source: "7.7"
+    example: 8
+    call: "delete from po where 1 = 1"
+    target: pg-sol
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: constant } }
+    expect: { decision: deny, layer: constraint, rule: requireWhere }
+
+  - id: W09a
+    source: "7.7"
+    example: 9
+    call: "explain analyze delete from po where id = 1"
+    target: pg-sol
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    expect:
+      decision: allow
+      layer: environment
+      rule: delete
+      constraints:
+        requireWhere: { value: true, layer: environment }
+        maxAffectedRows: { value: 1000, layer: environment }
+    note: "classified as the inner statement; allowed under the delete constraints"
+
+  - id: W09b
+    source: "7.7"
+    example: 9
+    call: "explain analyze delete from po where id = 1"
+    target: prod-ro
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    expect: { decision: deny, layer: ceiling, rule: read }
+
+  - id: W10
+    source: "7.7"
+    example: 10
+    call: "select utl_http.request('http://x/') from dual"
+    target: ora-vfy
+    action:
+      name: sql:select
+      risk: admin
+      facts: { tables: [dual], functions: [UTL_HTTP.REQUEST] }
+    expect:
+      decision: deny
+      layer: ceiling
+      rule: read
+      explain: "denied: sql:select (admin) on ora-vfy. Environment prod allows read only (ceiling)."
+
+  - id: W11
+    source: "7.7"
+    example: 11
+    call: "select * from dba_users"
+    target: prod-ro
+    action: { name: sql:select, risk: secret, facts: { tables: [dba_users] } }
+    expect:
+      decision: deny
+      layer: plugin-invariant
+      rule: secret
+      explain: >-
+        denied: sql:select (secret) on prod-ro. This call would reveal a secret, which no rule
+        can allow (plugin-invariant).
+
+  - id: W12
+    source: "7.7"
+    example: 12
+    call: "select email from customers"
+    target: prod-ro
+    action: { name: sql:select, risk: read, facts: { tables: [customers] } }
+    expect: { decision: allow, layer: plugin-default, rule: read }
+    note: "column masking is not in the MVP (M10 refuses `columns`); the decision is unchanged"
+
+  - id: W13a
+    source: "7.7"
+    example: 13
+    call: "set role x"
+    target: prod-ro
+    action: { name: sql:session, risk: admin }
+    expect:
+      decision: deny
+      layer: plugin-invariant
+      rule: session
+      explain: >-
+        denied: sql:session (admin) on prod-ro. The sql plugin never allows sql:session: session
+        state belongs to the broker's pooled connection (plugin-invariant).
+
+  - id: W13b
+    source: "7.7"
+    example: 13
+    call: "set role x"
+    target: pg-sol
+    action: { name: sql:session, risk: admin }
+    expect: { decision: deny, layer: plugin-invariant, rule: session }
+
+  - id: W13c
+    source: "7.7"
+    example: 13
+    call: "set role x"
+    target: lab-db
+    action: { name: sql:session, risk: admin }
+    expect: { decision: deny, layer: plugin-invariant, rule: session }
+
+  - id: W14a
+    source: "7.7"
+    example: 14
+    call: "grant select on po to x"
+    target: prod-ro
+    action: { name: sql:grant, risk: admin }
+    expect:
+      decision: deny
+      layer: guard
+      rule: sql:grant
+      explain: "denied: sql:grant (admin) on prod-ro. The global guard forbids sql:grant (guard)."
+
+  - id: W14b
+    source: "7.7"
+    example: 14
+    call: "grant select on po to x"
+    target: pg-sol
+    action: { name: sql:grant, risk: admin }
+    expect: { decision: deny, layer: guard, rule: sql:grant }
+
+  - id: W14c
+    source: "7.7"
+    example: 14
+    call: "grant select on po to x"
+    target: lab-db
+    action: { name: sql:grant, risk: admin }
+    expect: { decision: deny, layer: guard, rule: sql:grant }
+
+  - id: W15
+    source: "7.7"
+    example: 15
+    call: "kubectl -n app-test delete pod web-1"
+    target: aks-test
+    action:
+      name: kubectl:delete/pods
+      risk: destructive
+      facts: { namespace: app-test, names: [web-1] }
+    expect:
+      decision: allow
+      layer: environment
+      rule: delete/pods
+      constraints:
+        namespaces: { value: [app-test, app-test-2], layer: environment }
+        requireName: { value: true, layer: environment }
+
+  - id: W16
+    source: "7.7"
+    example: 16
+    call: "kubectl -n app-test delete pods --all"
+    target: aks-test
+    action:
+      name: kubectl:delete/pods
+      risk: destructive
+      facts: { namespace: app-test, names: [], all: true }
+    expect:
+      decision: deny
+      layer: constraint
+      rule: requireName
+      explain: >-
+        denied: kubectl:delete/pods (destructive) on aks-test. Constraint requireName from
+        environment test is not met: --all is refused; name the objects (constraint).
+
+  - id: W17
+    source: "7.7"
+    example: 17
+    call: "kubectl get secrets -n app-test"
+    target: aks-test
+    action: { name: kubectl:get/secrets, risk: secret, facts: { namespace: app-test } }
+    expect: { decision: deny, layer: plugin-invariant, rule: secret }
+
+  - id: W18
+    source: "7.7"
+    example: 18
+    call: "kubectl --as=admin get pods"
+    target: aks-test
+    action:
+      name: kubectl:get/pods
+      risk: read
+      facts: { namespace: default }
+      invariantHits: [--as]
+    expect:
+      decision: deny
+      layer: plugin-invariant
+      rule: --as
+      explain: >-
+        denied: kubectl:get/pods (read) on aks-test. The kubectl plugin never allows --as
+        (plugin-invariant).
+
+  # ----------------------------------------------------------------------------------------------
+  # §13 layer semantics
+  # ----------------------------------------------------------------------------------------------
+  - id: L01
+    source: "13"
+    topic: invariant beats environment allow
+    call: "alter session set current_schema = x"
+    target: lab-db
+    action: { name: sql:session, risk: admin }
+    note: "the environment and the target both allow session"
+    expect: { decision: deny, layer: plugin-invariant, rule: session }
+
+  - id: L02
+    source: "13"
+    topic: invariant beats environment allow
+    call: "kubectl --kubeconfig f get pods"
+    target: aks-test
+    action:
+      name: kubectl:get/pods
+      risk: read
+      facts: { namespace: app-test }
+      invariantHits: [--kubeconfig]
+    expect: { decision: deny, layer: plugin-invariant, rule: --kubeconfig }
+
+  - id: L03
+    source: "13"
+    topic: guard beats everything
+    call: "grant select on po to x"
+    target: lab-db
+    action: { name: sql:grant, risk: admin }
+    note: "ceiling admin, the environment allows *, the target allows grant"
+    expect: { decision: deny, layer: guard, rule: sql:grant }
+
+  - id: L04
+    source: "13"
+    topic: guard beats everything
+    call: "create user x identified by y"
+    target: lab-db
+    action: { name: sql:user.create, risk: admin }
+    expect: { decision: deny, layer: guard, rule: sql:user.* }
+
+  - id: L05
+    source: "13"
+    topic: ceiling beats a target allow
+    call: "update po set a = 1 where id = 1"
+    target: prod-writer
+    action: { name: sql:update, risk: write, facts: { tables: [po], where: column } }
+    expect: { decision: deny, layer: ceiling, rule: read }
+
+  - id: L06
+    source: "13"
+    topic: target overrides environment
+    call: "truncate table po"
+    target: pg-sol-cleanup
+    action: { name: sql:truncate, risk: destructive, facts: { tables: [po] } }
+    note: "the environment denies truncate; the target allows it"
+    expect: { decision: allow, layer: target, rule: truncate }
+
+  - id: L07
+    source: "13"
+    topic: target overrides environment
+    call: "update po set a = 1 where id = 1"
+    target: pg-sol-reporting
+    action: { name: sql:update, risk: write, facts: { tables: [po], where: column } }
+    note: "the environment allows write; the target denies it"
+    expect: { decision: deny, layer: target, rule: write }
+
+  - id: L08
+    source: "13"
+    topic: environment overrides plugin default
+    call: "update po set a = 1 where id = 1"
+    target: pg-sol
+    action: { name: sql:update, risk: write, facts: { tables: [po], where: column } }
+    note: "the plugin defaults allow only read"
+    expect:
+      decision: allow
+      layer: environment
+      rule: write
+      constraints:
+        requireWhere: { value: true, layer: environment }
+        maxAffectedRows: { value: 1000, layer: environment }
+
+  - id: L09
+    source: "13"
+    topic: environment overrides plugin default
+    call: "select * from po"
+    target: blind-db
+    action: { name: sql:select, risk: read, facts: { tables: [po] } }
+    expect: { decision: deny, layer: environment, rule: read }
+
+  - id: L10
+    source: "13"
+    topic: a silent layer passes the question down
+    call: "select * from po"
+    target: stage-db
+    action: { name: sql:select, risk: read, facts: { tables: [po] } }
+    note: "stage names only write for sql"
+    expect: { decision: allow, layer: plugin-default, rule: read }
+
+  - id: L11
+    source: "13"
+    topic: deny beats allow inside a layer
+    call: "delete from po where id = 1"
+    target: pg-sol-confused
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    note: "the target allows and denies delete"
+    expect: { decision: deny, layer: target, rule: delete }
+
+  - id: L12
+    source: "13"
+    topic: deny beats allow inside a layer
+    call: "truncate table po"
+    target: mixed-db
+    action: { name: sql:truncate, risk: destructive, facts: { tables: [po] } }
+    note: "the sql block allows destructive, the all: block of the same layer denies truncate"
+    expect: { decision: deny, layer: environment, rule: truncate }
+
+  - id: L13
+    source: "13"
+    topic: no rule means deny
+    call: "kubectl scale --replicas=0 deploy/po"
+    target: aks-stage
+    action:
+      name: kubectl:scale/deployments
+      risk: write
+      facts: { namespace: app, names: [po] }
+    expect:
+      decision: deny
+      layer: no-rule
+      rule: none
+      explain: >-
+        denied: kubectl:scale/deployments (write) on aks-stage. No rule allows this: target
+        aks-stage, environment stage and the kubectl plugin defaults do not allow
+        kubectl:scale/deployments (no-rule).
+
+  - id: L14
+    source: "13"
+    topic: no rule means deny
+    call: "insert into po values (1)"
+    target: mixed-db
+    action: { name: sql:insert, risk: write, facts: { tables: [po] } }
+    expect: { decision: deny, layer: no-rule, rule: none }
+
+  - id: L15
+    source: "13"
+    topic: constraint merging per key
+    call: "delete from po where id = 1"
+    target: qa-db
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    expect:
+      decision: allow
+      layer: environment
+      rule: delete
+      constraints:
+        requireWhere: { value: true, layer: plugin-default }
+        maxAffectedRows: { value: 1000, layer: environment }
+
+  - id: L16
+    source: "13"
+    topic: constraint merging per key
+    call: "delete from po where id = 1"
+    target: qa-small
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    note: "the target lowers maxAffectedRows; requireWhere stays from the plugin"
+    expect:
+      decision: allow
+      layer: environment
+      rule: delete
+      constraints:
+        requireWhere: { value: true, layer: plugin-default }
+        maxAffectedRows: { value: 100, layer: target }
+
+  - id: L17
+    source: "13"
+    topic: constraint merging per key
+    call: "delete from po where status = 'X'"
+    target: qa-small
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    measured: { affectedRows: 150 }
+    expect: { decision: deny, layer: constraint, rule: maxAffectedRows }
+
+  - id: L18
+    source: "13"
+    topic: constraint merging per key
+    call: "delete from po where status = 'X'"
+    target: qa-db
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    measured: { affectedRows: 150 }
+    expect: { decision: allow, layer: environment, rule: delete }
+
+  - id: L19
+    source: "13"
+    topic: constraint merging per key
+    call: "delete from po"
+    target: qa-db
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: none } }
+    note: "requireWhere from the plugin defaults still applies in qa"
+    expect: { decision: deny, layer: constraint, rule: requireWhere }
+
+  - id: L20
+    source: "13"
+    topic: unknown is denied first
+    call: "select 1 from dual where"
+    target: lab-db
+    action: { name: sql:unknown, risk: unknown, detail: "parse error near the end of the statement" }
+    note: "the environment allows *, unknown and secret"
+    expect:
+      decision: deny
+      layer: plugin-invariant
+      rule: unknown
+      explain: >-
+        denied: sql:unknown (unknown) on lab-db. Cannot classify this call: parse error near the
+        end of the statement (plugin-invariant).
+
+  - id: L21
+    source: "13"
+    topic: unknown is denied first
+    call: "kubectl --as=admin frobnicate pods"
+    target: aks-test
+    action:
+      name: kubectl:unknown
+      risk: unknown
+      invariantHits: [--as]
+      detail: "unknown verb 'frobnicate'"
+    expect: { decision: deny, layer: plugin-invariant, rule: unknown }
+
+  - id: L22
+    source: "13"
+    topic: secret is never allowed
+    call: "select * from dba_users"
+    target: lab-db
+    action: { name: sql:select, risk: secret, facts: { tables: [dba_users] } }
+    note: "the environment's all: block names the class secret"
+    expect: { decision: deny, layer: plugin-invariant, rule: secret }
+
+  - id: L23
+    source: "13"
+    topic: all blocks apply to every connector
+    call: "kubectl delete pod web-1"
+    target: mixed-k8s
+    action:
+      name: kubectl:delete/pods
+      risk: destructive
+      facts: { namespace: default, names: [web-1] }
+    expect: { decision: deny, layer: environment, rule: delete/* }
+
+  - id: L24
+    source: "13"
+    topic: all blocks apply to every connector
+    call: "kubectl scale --replicas=2 deploy/po"
+    target: mixed-k8s
+    action:
+      name: kubectl:scale/deployments
+      risk: write
+      facts: { namespace: default, names: [po] }
+    expect: { decision: allow, layer: target, rule: write }
+
+  - id: L25
+    source: "13"
+    topic: phase 2 decides with the effective environment
+    call: "delete from po where id = 1"
+    target: pg-sol
+    env: prod
+    action: { name: sql:delete, risk: destructive, facts: { tables: [po], where: column } }
+    note: "the secret pins prod; the target's own environment is test"
+    expect:
+      decision: deny
+      layer: ceiling
+      rule: read
+      explain: "denied: sql:delete (destructive) on pg-sol. Environment prod allows read only (ceiling)."
+
+  - id: L26
+    source: "13"
+    topic: phase 2 decides with the effective environment
+    call: "select * from po"
+    target: pg-sol-reporting
+    env: prod
+    action: { name: sql:select, risk: read, facts: { tables: [po] } }
+    expect: { decision: allow, layer: plugin-default, rule: read }
