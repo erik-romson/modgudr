@@ -27,3 +27,11 @@
   lines are still ignored with a warning. In the same spirit, a `modgudr-hosts` value with a scheme, userinfo or
   path "is rejected" by refusing the secret, never by dropping that one value. The message never repeats the value,
   because userinfo may hold a password.
+- **Step 09, `sqlglot` is forced to 30.24.0 for fakesnow too.** M12 pins `sqlglot==30.24.0` exactly (30.23 is the
+  floor for Oracle `q'…'` literals). `fakesnow`, already in the dev group for step 10, declares
+  `sqlglot>=30.22.0,<30.23` in its newest release (0.11.22), so the workspace did not resolve. The root
+  `pyproject.toml` now sets `[tool.uv] override-dependencies = ["sqlglot==30.24.0"]`, and `uv.lock` records the
+  override. fakesnow therefore runs on a sqlglot it does not declare. A throwaway smoke run outside the repository
+  (fakesnow 0.11.22, `snowflake-connector-python` 4.8.0, sqlglot 30.24.0) passed: `paramstyle="numeric"` binds, a
+  VARIANT path with a cast, `UPDATE` `rowcount`, rollback and `information_schema`. Step 10's fakesnow suite is the
+  real check. Remove the override once a fakesnow release accepts sqlglot 30.24.

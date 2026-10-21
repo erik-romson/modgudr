@@ -1,0 +1,405 @@
+# The Snowflake classification corpus (M12; pre-plan §7.1, §7.2, §8.1; edge cases SF-03, SF-07).
+#
+# Each row maps a `sql` string to the action the Snowflake dialect must return: `action` (name),
+# `risk`, and optionally `facts` (compared exactly), `invariant` (the plugin invariant that refuses
+# it; a row without one must break none) and `requireWhere` (met | unmet). The format and its
+# loader are in tests/support/sqlcorpus.py.
+#
+# Snowflake has no read-only transaction (SF-07): read safety rests on this classification and on
+# the role's rights. Every admin, secret and unknown row is also refused by a `read` ceiling.
+dialect: snowflake
+rows:
+  # --- reads (§7.1) ------------------------------------------------------------------------------
+  - sql: "select * from audit where action = 'delete'"
+    action: sql:select
+    risk: read
+    facts: { statement: select, kind: query, tables: [audit] }
+    note: a text blacklist would refuse it; the classified action is a plain read
+  - sql: "with d as (delete from po returning *) select * from d"
+    action: sql:delete
+    risk: destructive
+    facts: { statement: select, kind: query, where: none }
+    note: the most dangerous statement inside names the action
+  - sql: "select x from t1 union all select y from t2 where y in (select z from t3)"
+    action: sql:select
+    risk: read
+    facts: { tables: [t1, t2, t3] }
+  - sql: "select v:a.b::string from t"
+    action: sql:select
+    risk: read
+    note: a VARIANT path and a cast, no placeholder
+
+  # --- statement count (M12) ---------------------------------------------------------------------
+  - sql: "select 1; select 2"
+    action: sql:select
+    risk: read
+    invariant: multi-statement
+  - sql: "select 1;"
+    action: sql:select
+    risk: read
+    note: one trailing ';' is allowed
+  - sql: "select 1; -- note"
+    action: sql:select
+    risk: read
+  - sql: "select 'a;b'"
+    action: sql:select
+    risk: read
+    note: a ';' inside a string does not split
+  - sql: "select 1;;"
+    action: sql:select
+    risk: read
+    invariant: multi-statement
+    note: only one trailing ';'
+  - sql: "call p() ; drop table t"
+    action: sql:plsql
+    risk: admin
+    invariant: multi-statement
+
+  # --- session state and transaction control: plugin invariants (§7.3, SF-03) --------------------
+  - sql: "use role x"
+    action: sql:use
+    risk: admin
+    invariant: sql:use
+  - sql: "use warehouse w"
+    action: sql:use
+    risk: admin
+    invariant: sql:use
+  - sql: "use database d"
+    action: sql:use
+    risk: admin
+    invariant: sql:use
+  - sql: "use schema s"
+    action: sql:use
+    risk: admin
+    invariant: sql:use
+  - sql: "use secondary roles all"
+    action: sql:use
+    risk: admin
+    invariant: sql:use
+  - sql: "set v = 1"
+    action: sql:session
+    risk: admin
+    invariant: sql:session
+  - sql: "alter session set query_tag='x'"
+    action: sql:session
+    risk: admin
+    invariant: sql:session
+  - sql: "commit"
+    action: sql:transaction
+    risk: admin
+    invariant: sql:transaction
+  - sql: "rollback"
+    action: sql:transaction
+    risk: admin
+    invariant: sql:transaction
+
+  # --- first tokens: scripting blocks (M12) ------------------------------------------------------
+  - sql: "begin"
+    action: sql:plsql
+    risk: admin
+    note: first-token rule; refused either way
+  - sql: "begin transaction"
+    action: sql:plsql
+    risk: admin
+  - sql: "begin select 1; end"
+    action: sql:plsql
+    risk: admin
+
+  # --- leaving the account is admin (§7.2, §8.1) -------------------------------------------------
+  - sql: "copy into @s/x from (select 1)"
+    action: sql:unload
+    risk: admin
+    note: unload to a stage
+  - sql: "copy into 's3://b/k' from t"
+    action: sql:unload
+    risk: admin
+    note: unload to a cloud bucket
+  - sql: "copy into t from @s"
+    action: sql:copy
+    risk: write
+    facts: { tables: [t] }
+    note: a load into a table
+  - sql: "copy into t (c1) from @s"
+    action: sql:copy
+    risk: write
+  - sql: "put file:///x @~"
+    action: sql:put
+    risk: admin
+  - sql: "get @~/x file:///tmp"
+    action: sql:get
+    risk: admin
+    note: an exp.Command (unquoted file URI)
+  - sql: "get @~/x 'file:///tmp'"
+    action: sql:get
+    risk: admin
+    note: an exp.Get (quoted file URI)
+  - sql: "remove @s/x"
+    action: sql:remove
+    risk: admin
+  - sql: "rm @s/x"
+    action: sql:remove
+    risk: admin
+  - sql: "call p()"
+    action: sql:plsql
+    risk: admin
+  - sql: "execute immediate $$select 1$$"
+    action: sql:plsql
+    risk: admin
+
+  # --- SYSTEM$ functions (M12): admin, SYSTEM$GET_* secret, SYSTEM$TYPEOF read --------------------
+  - sql: "select system$get_x()"
+    action: sql:select
+    risk: secret
+    facts: { functions: [SYSTEM$GET_X] }
+  - sql: 'select "system$get_x"()'
+    action: sql:select
+    risk: secret
+    note: case and quotes are normalised
+  - sql: "select db.sch.system$get_x()"
+    action: sql:select
+    risk: secret
+  - sql: "select system$cancel_query('1')"
+    action: sql:select
+    risk: admin
+  - sql: "select system$abort_session(1)"
+    action: sql:select
+    risk: admin
+  - sql: "select system$typeof(1)"
+    action: sql:select
+    risk: read
+  - sql: "select my_udf(1)"
+    action: sql:select
+    risk: read
+    facts: { functions: [MY_UDF] }
+    note: accepted gap A9, a function no catalogue knows is read
+  - sql: "explain select system$get_x()"
+    action: sql:explain
+    risk: read
+    note: the function catalogue never applies inside a Command tail; only an op that runs EXPLAIN may take it
+
+  # --- secrets (§7.2) ----------------------------------------------------------------------------
+  - sql: "show secrets"
+    action: sql:show
+    risk: secret
+  - sql: "show integrations"
+    action: sql:show
+    risk: secret
+  - sql: "describe integration i"
+    action: sql:describe
+    risk: secret
+  - sql: "desc storage integration i"
+    action: sql:describe
+    risk: secret
+  - sql: "describe secret s"
+    action: sql:describe
+    risk: secret
+    note: sqlglot cannot parse it; a leading-words rule classifies it
+  - sql: "desc secret s"
+    action: sql:describe
+    risk: secret
+
+  # --- time travel, result scans and metadata are read (§8.1) ------------------------------------
+  - sql: "select * from t at(offset => -60)"
+    action: sql:select
+    risk: read
+    facts: { tables: [t] }
+  - sql: "select * from t before(statement => '01a')"
+    action: sql:select
+    risk: read
+  - sql: "select * from table(result_scan(last_query_id()))"
+    action: sql:select
+    risk: read
+  - sql: "show tables"
+    action: sql:show
+    risk: read
+  - sql: "describe table t"
+    action: sql:describe
+    risk: read
+    facts: { tables: [t] }
+  - sql: "select * from snowflake.account_usage.query_history"
+    action: sql:select
+    risk: read
+
+  # --- writes, locks and sequences ---------------------------------------------------------------
+  - sql: "insert into t values (1)"
+    action: sql:insert
+    risk: write
+    facts: { statement: insert, kind: dml, tables: [t] }
+  - sql: "insert all into a values (1) into b values (2) select 1"
+    action: sql:insert
+    risk: write
+  - sql: "insert overwrite into t select 1"
+    action: sql:insert
+    risk: destructive
+    note: INSERT OVERWRITE replaces the table's rows
+  - sql: "merge into t using s on t.id = s.id when matched then update set a = s.a when not matched then insert (id) values (s.id)"
+    action: sql:merge
+    risk: write
+  - sql: "merge into t using s on t.id = s.id when matched then delete"
+    action: sql:merge
+    risk: destructive
+    note: a DELETE arm removes rows
+  - sql: "select * from t for update"
+    action: sql:select
+    risk: write
+  - sql: "select seq.nextval"
+    action: sql:select
+    risk: write
+  - sql: "describe insert into t values (1)"
+    action: sql:insert
+    risk: write
+    facts: { statement: describe }
+    note: a statement nested in DESCRIBE counts
+  - sql: "truncate table t"
+    action: sql:truncate
+    risk: destructive
+    facts: { tables: [t] }
+  - sql: "delete from po where id = :id"
+    action: sql:delete
+    risk: destructive
+    facts: { tables: [po], where: column }
+    requireWhere: met
+
+  # --- DDL and rights ----------------------------------------------------------------------------
+  - sql: "create table x as select 1"
+    action: sql:ddl.create
+    risk: admin
+  - sql: "drop table t"
+    action: sql:ddl.drop
+    risk: destructive
+  - sql: "alter table t add column c int"
+    action: sql:ddl.alter
+    risk: admin
+  - sql: "undrop table t"
+    action: sql:ddl.undrop
+    risk: admin
+  - sql: "comment on table t is 'x'"
+    action: sql:ddl.comment
+    risk: admin
+  - sql: "grant role r to user u"
+    action: sql:grant
+    risk: admin
+    note: an exp.Command; the global guard refuses sql:grant
+  - sql: "grant select on table t to role r"
+    action: sql:grant
+    risk: admin
+  - sql: "revoke role r from user u"
+    action: sql:revoke
+    risk: admin
+
+  # --- unknown: refused, never guessed (M12) -----------------------------------------------------
+  - sql: "select * from identifier(:t)"
+    action: sql:unknown
+    risk: unknown
+  - sql: "select identifier('system$cancel_query')('1')"
+    action: sql:unknown
+    risk: unknown
+    note: a function name known only at run time cannot be looked up
+  - sql: "select * from $t"
+    action: sql:unknown
+    risk: unknown
+  - sql: "savepoint s"
+    action: sql:unknown
+    risk: unknown
+    note: parses as a bare Alias; the whitelist refuses it
+  - sql: "exec p"
+    action: sql:unknown
+    risk: unknown
+  - sql: ""
+    action: sql:unknown
+    risk: unknown
+  - sql: ";;"
+    action: sql:unknown
+    risk: unknown
+  - sql: "select x into y from t"
+    action: sql:unknown
+    risk: unknown
+  - sql: "show grants"
+    action: sql:unknown
+    risk: unknown
+    note: a SHOW form without a rule
+  - sql: "list @s"
+    action: sql:unknown
+    risk: unknown
+    note: exp.ListStage is not in the M12 whitelist
+
+  # --- requireWhere unmet (M12) ------------------------------------------------------------------
+  - sql: "update t set a = 1 where 1=1"
+    action: sql:update
+    risk: write
+    facts: { where: constant }
+    requireWhere: unmet
+  - sql: "update t set a = 1 where 'a'='a'"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where 1<2"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where true"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where not 1=0"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where id=1 or 1=1"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where id = id"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where t.id = id"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where t.id = t.id"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: 'update t set a = 1 where "ID" = id'
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where id >= id"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where id = id or x = 1"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1"
+    action: sql:update
+    risk: write
+    facts: { where: none }
+    requireWhere: unmet
+  - sql: "update t set a = 1 where :a = :a"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+    note: no column at all
+
+  # --- requireWhere met: the positive controls ---------------------------------------------------
+  - sql: "update t set a = 1 where id = :id"
+    action: sql:update
+    risk: write
+    facts: { statement: update, kind: dml, tables: [t], where: column }
+    requireWhere: met
+  - sql: "update t set a = 1 where id = id and x = :x"
+    action: sql:update
+    risk: write
+    requireWhere: met
+  - sql: 'update t set a = 1 where "ID" = :id'
+    action: sql:update
+    risk: write
+    requireWhere: met
+  - sql: "update a set x = 1 from b where a.id = b.id"
+    action: sql:update
+    risk: write
+    requireWhere: met
+    note: two different qualifiers make a join condition
