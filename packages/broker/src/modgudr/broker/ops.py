@@ -29,7 +29,9 @@ from modgudr.client.protocol import SUPPORTED_VERSIONS
 from ..spi import (
     Action,
     AuthFailed,
+    BadArguments,
     Call,
+    ConstraintBreach,
     Decision,
     OperationSpec,
     StoreError,
@@ -857,7 +859,12 @@ class Dispatcher:
             raise Refused(
                 "denied", str(exc), record=None, layer="limits", rule="maxRowsHard"
             ) from None
-        action = _classify(target, Call(target=target.config.name, op=op, args=args))
+        probe = Call(target=target.config.name, op=op, args=args)
+        try:
+            target.connector.validate(probe, target.config.config, max_rows=target.limits.max_rows)
+        except BadArguments as exc:
+            raise BadRequest(str(exc)) from None
+        action = _classify(target, probe)
         decision = self.b.decide(target, action, resolved.env)
         return {
             "target": target.config.name,
@@ -998,8 +1005,12 @@ class Dispatcher:
             raise Refused(
                 "denied", str(exc), record="denied", layer="limits", rule="maxRowsHard"
             ) from None
-        # 4. Classify and decide with the declared environment (phase 1).
         call = Call(target=config.name, op=request.op, args=args, audit_id=audit_id)
+        try:
+            target.connector.validate(call, config.config, max_rows=limits.max_rows)
+        except BadArguments as exc:
+            raise Refused("bad_request", str(exc), record="bad_request") from None
+        # 4. Classify and decide with the declared environment (phase 1).
         action = _classify(target, call)
         decision = b.decide(target, action, resolved.env)
         fields.update(
@@ -1244,6 +1255,10 @@ class Execution:
             )
         if isinstance(exc, StoreError):
             return _Outcome("failed", None, "upstream", str(exc), "secret")
+        if isinstance(exc, ConstraintBreach):
+            return _Outcome(
+                "failed", None, "denied", str(exc), "exec", layer="constraint", rule=exc.rule
+            )
         if isinstance(exc, AuthFailed):
             return _Outcome("failed", None, "upstream", f"authentication failed: {exc}", "exec")
         if isinstance(exc, LoginFailed | Latched):

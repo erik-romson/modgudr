@@ -84,7 +84,8 @@ def decide(action: Action, scope: Scope) -> Decision:
         )
     if action.invariant_hits:
         hit = action.invariant_hits[0]
-        return deny(Layer.INVARIANT, hit, f"The {scope.type} plugin never allows {hit}")
+        why = f": {action.detail.rstrip('. ')}" if action.detail else ""
+        return deny(Layer.INVARIANT, hit, f"The {scope.type} plugin never allows {hit}{why}")
     for rule in scope.invariants:
         if rule.matches(action):
             why = f": {rule.reason}" if rule.reason else ""

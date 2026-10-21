@@ -195,6 +195,9 @@ class EchoConnector:
     def constraint_checks(self) -> Mapping[str, ConstraintCheck]:
         return {}
 
+    def validate(self, call: Call, config: BaseModel, *, max_rows: int) -> None:
+        return None
+
     def classify(self, call: Call, config: BaseModel) -> Action:
         risk = _RISKS.get(call.op)
         if risk is None:

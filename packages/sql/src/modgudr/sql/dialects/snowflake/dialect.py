@@ -9,12 +9,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from modgudr.spi import Action, BindStyle, Risk, TypedParam
 from modgudr.sql.binds import parse_value
 from modgudr.sql.classify import classify
 
 from .catalogue import FUNCTIONS, OBJECTS, RULES, SQLGLOT_DIALECT
+
+if TYPE_CHECKING:
+    from modgudr.sql.config import SqlConfig
+    from modgudr.sql.driver import Driver
 
 
 class SnowflakeDialect:
@@ -53,8 +58,22 @@ class SnowflakeDialect:
             return ("TIMESTAMP_TZ", value)
         return value
 
-    def tables_query(self) -> str | None:
-        return None
+    def tables_query(self) -> str:
+        return (
+            "select table_schema, table_name, table_type from information_schema.tables "
+            "where table_schema <> 'INFORMATION_SCHEMA' and table_name ilike :pattern "
+            "order by table_schema, table_name"
+        )
 
-    def describe_query(self) -> str | None:
-        return None
+    def describe_query(self) -> str:
+        return "describe table {table}"
+
+    def sample_query(self) -> str:
+        return "select * from {table} limit {n}"
+
+    def driver(self, config: SqlConfig) -> Driver:
+        """The driver adapter of a target. The connector library is imported here, not at
+        start, so classifying works without the `snowflake` extra."""
+        from .driver_snowflake import SnowflakeDriver
+
+        return SnowflakeDriver(config)

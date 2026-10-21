@@ -46,6 +46,26 @@ class UpstreamFailure(Exception):
     """
 
 
+class BadArguments(Exception):
+    """Raised by a connector's `validate` when the arguments of an op are wrong: a bad identifier,
+    a bind that matches no placeholder, a number out of range.
+
+    The wire code is `bad_request` (exit 64); the message says what is valid.
+    """
+
+
+class ConstraintBreach(Exception):
+    """Raised by a connector when a constraint that is measured after the run is not met.
+
+    The connector has rolled back before it raises. The wire code is `denied`, layer `constraint`
+    (exit 2), with `rule` naming the constraint (M5, M14).
+    """
+
+    def __init__(self, message: str, *, rule: str) -> None:
+        super().__init__(message)
+        self.rule = rule
+
+
 class StoreError(Exception):
     """Raised by a store that cannot resolve a reference (item missing, store unreachable).
 
@@ -157,6 +177,12 @@ class Connector(Protocol):
         """The checks of the constraints this connector supports, by constraint name."""
         ...
 
+    def validate(self, call: Call, config: BaseModel, *, max_rows: int) -> None:
+        """Check the arguments of an op beyond its `OperationSpec` (M6 step 3): identifiers,
+        ranges, bind names against placeholders. `max_rows` is the call's effective `maxRows`.
+        Raises `BadArguments`; runs before classification and touches nothing."""
+        ...
+
     def classify(self, call: Call, config: BaseModel) -> Action:
         """Name, risk and facts of a call. Never raises: what it cannot place is `unknown`."""
         ...
@@ -221,9 +247,18 @@ class SqlDialect(Protocol):
         """A typed parameter as the driver takes it."""
         ...
 
-    def tables_query(self) -> str | None: ...
+    def tables_query(self) -> str:
+        """The `tables` op's statement, with one named bind `:pattern` (a LIKE pattern)."""
+        ...
 
-    def describe_query(self) -> str | None: ...
+    def describe_query(self) -> str:
+        """The `describe` op's statement; `{table}` stands for the validated identifier."""
+        ...
+
+    def sample_query(self) -> str:
+        """The `sample` op's statement; `{table}` and `{n}` stand for the validated identifier
+        and row count."""
+        ...
 
 
 class CredentialProvider(Protocol):

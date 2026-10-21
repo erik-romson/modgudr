@@ -6,6 +6,15 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = ["modgudr-broker", "sqlglot==30.24.0"]
 
+[project.optional-dependencies]
+snowflake = ["snowflake-connector-python>=4.8,<5", "cryptography"]
+
+[project.entry-points."modgudr.connectors"]
+sql = "modgudr.sql.connector:SqlConnector"
+
+[project.entry-points."modgudr.sql_dialects"]
+snowflake = "modgudr.sql.dialects.snowflake:SnowflakeDialect"
+
 [tool.uv.sources]
 modgudr-broker = { workspace = true }
 

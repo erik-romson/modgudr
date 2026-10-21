@@ -22,8 +22,10 @@ from .credentials import (
 )
 from .plugins import (
     AuthFailed,
+    BadArguments,
     BindStyle,
     Connector,
+    ConstraintBreach,
     CredentialProvider,
     Secrets,
     SecretStore,
@@ -61,6 +63,7 @@ __all__ = [
     "ArgKind",
     "ArgSpec",
     "AuthFailed",
+    "BadArguments",
     "BindStyle",
     "Call",
     "Cell",
@@ -68,6 +71,7 @@ __all__ = [
     "ColumnType",
     "Connector",
     "Constraint",
+    "ConstraintBreach",
     "ConstraintCheck",
     "ConstraintValue",
     "CredentialProvider",

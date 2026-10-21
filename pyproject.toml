@@ -32,7 +32,7 @@ dev = [
     "fakesnow",
     "modgudr-client",
     "modgudr-broker",
-    "modgudr-sql",
+    "modgudr-sql[snowflake]",
     "modgudr-kubectl",
     "modgudr-store-file",
     "modgudr-store-bws",

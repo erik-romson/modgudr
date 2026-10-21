@@ -145,6 +145,16 @@ def test_an_invariant_hit_found_by_the_classifier_is_refused() -> None:
     assert_decided(decide(action, scope), "deny", Layer.INVARIANT, "--as")
 
 
+def test_an_invariant_hit_says_why_when_the_classifier_did() -> None:
+    scope = make_scope(plugin=kubectl_plugin(), env_rules={"kubectl": rules(allow=["read"])})
+    action = Action(
+        "kubectl:get/pods", Risk.READ, invariant_hits=("op-contract",), detail="use the write op."
+    )
+    decision = decide(action, scope)
+    assert_decided(decision, "deny", Layer.INVARIANT, "op-contract")
+    assert decision.message == "The kubectl plugin never allows op-contract: use the write op"
+
+
 def test_invariant_comes_before_guard_and_guard_before_ceiling() -> None:
     scope = make_scope(ceiling=Risk.READ, guard=["sql:*"])
     assert decide(act("sql:session", Risk.ADMIN), scope).layer is Layer.INVARIANT
