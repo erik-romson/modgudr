@@ -24,8 +24,9 @@ from typing import cast
 from .scrub import Scrubber
 
 #: Record types: the call records, the single records of refused calls, and the lifecycle records.
+#: `failed` is a call that ended before its decision record: a store error at M6 step 7.
 CALL_TYPES = frozenset({"decision", "completion"})
-SINGLE_TYPES = frozenset({"denied", "throttled", "locked", "bad_request"})
+SINGLE_TYPES = frozenset({"denied", "throttled", "locked", "bad_request", "failed"})
 LIFECYCLE_TYPES = frozenset(
     {
         "broker.start",

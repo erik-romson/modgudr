@@ -21,7 +21,12 @@ from .plugins import (
     Secrets,
     SecretStore,
     SqlDialect,
+    StoreConfigError,
+    StoreContext,
+    StoreError,
+    StoreFactory,
     Target,
+    UpstreamFailure,
 )
 from .risk import CEILINGS, RISK_NAMES, Risk
 from .rules import (
@@ -74,8 +79,13 @@ __all__ = [
     "SecretStore",
     "Secrets",
     "SqlDialect",
+    "StoreConfigError",
+    "StoreContext",
+    "StoreError",
+    "StoreFactory",
     "Target",
     "TokenRequest",
     "TypedParam",
+    "UpstreamFailure",
     "pattern_matches",
 ]

@@ -292,10 +292,14 @@ version = "0.1.0"
 source = { editable = "packages/store-file" }
 dependencies = [
     { name = "modgudr-broker" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "modgudr-broker", editable = "packages/broker" }]
+requires-dist = [
+    { name = "modgudr-broker", editable = "packages/broker" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+]
 
 [[package]]
 name = "modgudr-workspace"

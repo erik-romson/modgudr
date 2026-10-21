@@ -7,6 +7,8 @@ the core decides (§7.5). A plugin never sees a call the policy refused.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal, Protocol
 
 from pydantic import BaseModel
@@ -29,6 +31,40 @@ class AuthFailed(Exception):
     def __init__(self, message: str, *, final: bool = False) -> None:
         super().__init__(message)
         self.final = final
+
+
+class UpstreamFailure(Exception):
+    """Raised by a connector when the backend failed (driver error, process exit ≠ 0).
+
+    The wire code is `upstream` (exit 5). The broker scrubs the message before it leaves.
+    """
+
+
+class StoreError(Exception):
+    """Raised by a store that cannot resolve a reference (item missing, store unreachable).
+
+    The wire code is `upstream` (exit 5).
+    """
+
+
+class StoreConfigError(Exception):
+    """Raised by a store factory that cannot start with its configuration: the broker refuses
+    to start (exit 78)."""
+
+
+@dataclass(frozen=True)
+class StoreContext:
+    """What a store factory gets at broker start."""
+
+    scheme: str
+    #: The canonical `MODGUDR_HOME` (M1); store state lives under it (M2).
+    home: Path
+    #: `modgudr-broker --dev` (argv only, M3).
+    dev: bool
+    #: The company file's `store.<scheme>` block; the store validates it and refuses unknown keys.
+    settings: Mapping[str, object] = field(default_factory=dict[str, object])
+    #: `modgudr-broker --secrets-file` (the `file` store).
+    secrets_file: Path | None = None
 
 
 class Secrets(Protocol):
@@ -107,6 +143,10 @@ class SecretStore(Protocol):
     async def lock(self) -> None: ...
 
     def is_unlocked(self) -> bool: ...
+
+
+#: What a `modgudr.secret_stores` entry point names: a class or function taking the context.
+StoreFactory = Callable[[StoreContext], SecretStore]
 
 
 class SqlDialect(Protocol):

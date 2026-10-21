@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "modgudr: modgudr-store-file"
 requires-python = ">=3.12"
 license = "Apache-2.0"
-dependencies = ["modgudr-broker"]
+dependencies = ["modgudr-broker", "PyYAML>=6.0.3"]
+
+[project.entry-points."modgudr.secret_stores"]
+file = "modgudr.store_file:FileStore"
 
 [tool.uv.sources]
 modgudr-broker = { workspace = true }
