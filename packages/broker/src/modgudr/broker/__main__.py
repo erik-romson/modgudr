@@ -1,7 +1,5 @@
-"""`python -m modgudr.broker`: the daemon."""
+"""`python -m modgudr.broker`: the daemon (re-executes under `-I`, then hardens)."""
 
-import sys
+from .daemon import entry
 
-from .daemon import main
-
-sys.exit(main())
+entry()

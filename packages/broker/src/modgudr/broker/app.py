@@ -57,6 +57,7 @@ from ..spi import (
 )
 from .audit import AuditUnavailable, AuditWriter, new_audit_id
 from .engine.decide import Scope, decide, scope_for
+from .harden import NOT_APPLIED, Hardening
 from .limits import Limits, Slots, defaults_limits, effective_limits
 from .ops import (
     LOCKED_MESSAGE,
@@ -137,6 +138,10 @@ class BrokerConfig:
     watchdog_interval: float = 5.0
     #: How managed-settings files are stat'ed after opening (tests inject a root owner).
     settings_fstat: Callable[[int], os.stat_result] | None = None
+    #: The scrubber the daemon's log filter shares with the broker; a fresh one when None.
+    scrubber: Scrubber | None = None
+    #: The hardening facts of the daemon (M23); None for a factory-built broker.
+    hardening: Hardening | None = None
 
     @property
     def human_socket(self) -> Path:
@@ -271,7 +276,7 @@ def _check_store_config(config: BrokerConfig, policy: Policy, scheme: str) -> No
             )
 
 
-def _broker_version() -> str:
+def broker_version() -> str:
     try:
         return importlib.metadata.version("modgudr-broker")
     except importlib.metadata.PackageNotFoundError:
@@ -304,9 +309,9 @@ class Broker:
         self.store_scheme = store_scheme
         self._store_factory = store_factory
         self.uid = os.getuid()
-        self.version = _broker_version()
+        self.version = broker_version()
         self.limits = defaults_limits(policy.company.defaults)
-        self.scrubber = Scrubber()
+        self.scrubber = config.scrubber if config.scrubber is not None else Scrubber()
         self.audit = AuditWriter(
             config.audit_dir,
             self.scrubber,
@@ -777,6 +782,11 @@ class Broker:
             "locked": not unlocked,
             "dev": self.config.dev,
             "store": self.store_scheme,
+            "hardening": (
+                self.config.hardening.to_json()
+                if self.config.hardening is not None
+                else NOT_APPLIED
+            ),
             "channel": conn.channel.value,
             **self.facts.to_json(),
             "isolation": self._isolation.label,

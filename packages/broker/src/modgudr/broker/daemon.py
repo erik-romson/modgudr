@@ -3,13 +3,14 @@
 Any start failure exits 78 with nothing listening and no socket left behind. SIGTERM (and
 SIGINT) drain: in-flight calls end `cancelled: shutdown`, the sockets are unlinked, then the
 `broker.stop` record is written. The re-exec under `python -I` and the process hardening belong to
-`main` (M23); `run` is what tests drive.
+`entry`/`main` (M23); `run` is what tests drive.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import os
 import signal
 import sys
@@ -17,14 +18,20 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import NoReturn, TextIO
 
-from .app import Broker, BrokerConfig, build
+from .app import Broker, BrokerConfig, broker_version, build
+from .harden import Hardening, HardeningError, apply, reexec
 from .policy.lint import lint_main
 from .registry import PluginError, PluginRegistry
+from .scrub import Scrubber
 from .server import StartError
 
 EXIT_OK = 0
 EXIT_USAGE = 64
 EXIT_CONFIG = 78
+
+
+#: How `main` hardens the process: (scrubber, policy directory) to the facts (`harden.apply`).
+Hardener = Callable[[Scrubber, Path], Hardening]
 
 
 class _UsageError(Exception):
@@ -46,6 +53,11 @@ def _parser() -> argparse.ArgumentParser:
         "--dev",
         action="store_true",
         help="development mode: enables the file store and marks every audit line dev: true",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"modgudr-broker {broker_version()} (isolated={sys.flags.isolated})",
     )
     parser.add_argument("--policy-dir", type=Path, help="default: $MODGUDR_HOME/policy.d")
     parser.add_argument("--secrets-file", type=Path, help="the file store's secrets (with --dev)")
@@ -91,7 +103,22 @@ def _lint(words: Sequence[str]) -> int:
     return lint_main(words, registry)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def entry() -> NoReturn:
+    """The `modgudr-broker` console script: re-execute under `-I`, then serve hardened (M23)."""
+    words = sys.argv[1:]
+    try:
+        reexec(words)
+    except HardeningError as exc:
+        print(f"modgudr-broker: {exc}", file=sys.stderr)
+        sys.exit(EXIT_CONFIG)
+    sys.exit(main(words, hardener=apply))
+
+
+def main(argv: Sequence[str] | None = None, *, hardener: Hardener | None = None) -> int:
+    """Parse, then (when `hardener` is given) harden before the policy loads, then serve.
+
+    `MODGUDR_HOME` and `MODGUDR_SOCKET` are read into the config before the hardening replaces
+    the environment. A hardening failure exits 78."""
     words = list(sys.argv[1:] if argv is None else argv)
     if words and words[0] == "lint":
         return _lint(words[1:])
@@ -112,4 +139,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except StartError as exc:
         print(f"modgudr-broker: {exc}", file=sys.stderr)
         return EXIT_CONFIG
+    if hardener is not None:
+        scrubber = Scrubber()
+        try:
+            facts = hardener(scrubber, config.policy_dir)
+        except HardeningError as exc:
+            print(f"modgudr-broker: hardening failed: {exc}", file=sys.stderr)
+            return EXIT_CONFIG
+        for warning in facts.warnings:
+            print(f"modgudr-broker: warning: {warning}", file=sys.stderr)
+        config = dataclasses.replace(config, scrubber=scrubber, hardening=facts)
     return asyncio.run(run(config))

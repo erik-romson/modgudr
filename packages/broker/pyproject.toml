@@ -7,7 +7,7 @@ license = "Apache-2.0"
 dependencies = ["modgudr-client", "pydantic>=2.14,<3", "PyYAML>=6.0.3"]
 
 [project.scripts]
-modgudr-broker = "modgudr.broker.daemon:main"
+modgudr-broker = "modgudr.broker.daemon:entry"
 
 [tool.uv.sources]
 modgudr-client = { workspace = true }
