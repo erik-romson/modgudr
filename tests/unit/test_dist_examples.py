@@ -83,19 +83,42 @@ def test_example_policy_says_where_it_is_installed_and_who_owns_it() -> None:
     assert "owned by you" in targets
 
 
-def test_install_script_installs_both_the_broker_and_the_client_command() -> None:
-    """uv links only the named tool's executables, so `modgudr` needs its own install line (B1)."""
+@pytest.fixture
+def bare_bin(shortdir: Path) -> Path:
+    """A PATH with only the tools the installer needs, so no `mg` (macOS has /usr/bin/mg)."""
+    bin_dir = shortdir / "bin"
+    bin_dir.mkdir()
+    for tool in ("cat", "dirname"):
+        found = shutil.which(tool, path="/usr/bin:/bin")
+        assert found is not None
+        (bin_dir / tool).symlink_to(found)
+    return bin_dir
+
+
+def install_dry_run(bin_dir: Path) -> list[str]:
     done = subprocess.run(
         ["/bin/sh", str(ROOT / "dist" / "install-l0.sh"), "--dry-run", "--prefix", "/nonexistent"],
         capture_output=True,
         text=True,
         check=True,
-        env={"PATH": "/usr/bin:/bin"},
+        env={"PATH": str(bin_dir)},
     )
-    installs = [line for line in done.stdout.splitlines() if line.startswith("+ uv tool install")]
+    return done.stdout.splitlines()
+
+
+def test_install_script_installs_both_the_broker_and_the_client_command(bare_bin: Path) -> None:
+    """uv links only the named tool's executables, so `modgudr` needs its own install line (B1)."""
+    lines = install_dry_run(bare_bin)
+    installs = [line for line in lines if line.startswith("+ uv tool install")]
     assert len(installs) == 2
     assert f"--from {ROOT}/packages/broker modgudr-broker" in installs[0]
     assert installs[1] == f"+ uv tool install --from {ROOT}/packages/client modgudr-client"
-    alias = [i for i, line in enumerate(done.stdout.splitlines()) if "ln -s modgudr" in line]
-    lines = done.stdout.splitlines()
-    assert all(i > lines.index(installs[1]) for i in alias)
+    alias = lines.index("+ ln -s modgudr /nonexistent/bin/mg")
+    assert alias > lines.index(installs[1])
+
+
+def test_install_script_creates_no_alias_when_mg_is_taken(bare_bin: Path) -> None:
+    (bare_bin / "mg").symlink_to("/bin/echo")
+    lines = install_dry_run(bare_bin)
+    assert not any("ln -s" in line for line in lines)
+    assert "# the short alias name is already taken on this machine; no alias is created" in lines
