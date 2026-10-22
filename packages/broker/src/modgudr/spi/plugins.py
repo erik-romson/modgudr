@@ -16,7 +16,10 @@ from pydantic import BaseModel
 from .calls import Call, OperationSpec, ResultSink, TypedParam
 from .credentials import (
     Destination,
+    Endpoint,
+    EndpointRequest,
     MintedToken,
+    ProviderTarget,
     ResolvedSecret,
     SecretRef,
     TokenRequest,
@@ -42,8 +45,16 @@ class AuthFailed(Exception):
 class UpstreamFailure(Exception):
     """Raised by a connector when the backend failed (driver error, process exit ≠ 0).
 
-    The wire code is `upstream` (exit 5). The broker scrubs the message before it leaves.
+    The wire code is `upstream` (exit 5). The broker scrubs the message before it leaves. `stage`
+    is what the completion record names as the failed stage (M9): `exec` unless given.
     """
+
+    stage: str = "exec"
+
+    def __init__(self, message: str = "", *, stage: str | None = None) -> None:
+        super().__init__(message)
+        if stage is not None:
+            self.stage = stage
 
 
 class BadArguments(Exception):
@@ -130,6 +141,37 @@ class Secrets(Protocol):
         ...
 
 
+class Credentials(Protocol):
+    """The core's credential provider as one `provider:` target sees it (§8.4, M18).
+
+    Only while a call executes, after its decision record (M6 step 9): first the endpoint, then
+    the token. A failure raises `UpstreamFailure` whose `stage` is `provider.endpoint` or
+    `provider.token`; a lock while the provider worked raises at once, and the result is not kept.
+    """
+
+    async def endpoint(self, cluster: Mapping[str, str]) -> Endpoint:
+        """The cluster's API server, from the provider (cached until lock), never the policy."""
+        ...
+
+    async def token(self, resource: str) -> MintedToken:
+        """A short-lived token for `resource`, registered with the scrubber before it is
+        returned (M8)."""
+        ...
+
+
+@dataclass(frozen=True)
+class TargetContext:
+    """What the broker gives a connector at `open` beyond the target's own keys."""
+
+    #: The canonical `MODGUDR_HOME`: per-call state lives under its `run/` (M2).
+    home: Path
+    #: The broker's `PATH`, where a connector finds the executable it drives (`kubectl`), and
+    #: the `PATH` of that executable's children.
+    path: str = ""
+    #: The provider of a `provider:` target; None for a `secret:` target.
+    credentials: Credentials | None = None
+
+
 class Target(Protocol):
     """One configured, open target. Owns pools or sessions."""
 
@@ -149,6 +191,16 @@ class Target(Protocol):
         """Close pools and sessions without waiting for work in flight. The broker calls it on
         every lock (M7) and at shutdown, so it may run more than once; after a lock the target
         opens again lazily, through `Secrets.login`, on its next call."""
+        ...
+
+
+@runtime_checkable
+class ReportingTarget(Protocol):
+    """A target that reports facts for `status`, `targets`, `describe` and `explain`."""
+
+    def facts(self) -> Mapping[str, object]:
+        """JSON-able facts, without contacting anything (for kubectl: the endpoint, or "not
+        fetched", and the `kubectl` it runs). A `problem` key holds why calls will fail."""
         ...
 
 
@@ -189,9 +241,12 @@ class Connector(Protocol):
         """Name, risk and facts of a call. Never raises: what it cannot place is `unknown`."""
         ...
 
-    async def open(self, name: str, config: BaseModel, secrets: Secrets | None) -> Target:
+    async def open(
+        self, name: str, config: BaseModel, secrets: Secrets | None, *, context: TargetContext
+    ) -> Target:
         """Build the target without contacting it: nothing is contacted before the decision
-        record (M6). `secrets` is None for a `provider:` target."""
+        record (M6). `secrets` is None for a `provider:` target, whose provider is
+        `context.credentials`."""
         ...
 
 
@@ -276,14 +331,57 @@ class SqlDialect(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class ProviderContext:
+    """What a credential provider factory gets at broker start (M18)."""
+
+    #: The canonical `MODGUDR_HOME` (M1); custody state lives under it (M2).
+    home: Path
+    #: The `pwd` home (M3): the `HOME` of children that use the developer's own login.
+    user_home: Path
+    #: The broker's `PATH`: where the provider finds its executable (`az`), and its children's.
+    path: str = ""
+    #: `LANG` and `LC_*` of the broker's environment, for its children.
+    locale: Mapping[str, str] = field(default_factory=dict[str, str])
+
+
 class CredentialProvider(Protocol):
-    """Mints short-lived tokens for `provider:` targets (§8.4): `azure-cli`."""
+    """Finds cluster endpoints and mints short-lived tokens for `provider:` targets (§8.4, M18):
+    `azure-cli`. Every failure it reports raises `UpstreamFailure`, with a message that says
+    what to do."""
 
     @property
     def name(self) -> str: ...
 
-    async def mint(self, request: TokenRequest) -> MintedToken: ...
+    @property
+    def tiers(self) -> frozenset[str]:
+        """The `credential.tier` values it serves; another one refuses the broker's start."""
+        ...
+
+    def facts(self) -> Mapping[str, object]:
+        """JSON-able facts for `status` (the executable it found). A `problem` key holds why
+        calls will fail."""
+        ...
+
+    def state_dir(self, target: ProviderTarget) -> Path | None:
+        """The directory that holds the target's own login (custody), created 0700; None when
+        the provider uses the developer's login (borrowed)."""
+        ...
+
+    async def endpoint(self, request: EndpointRequest) -> Endpoint:
+        """The cluster's API server. Cached until `lock`; the first one fetched in a session is
+        authoritative (M18)."""
+        ...
+
+    async def mint(self, request: TokenRequest) -> MintedToken:
+        """A token, cached until shortly before it expires; single-flight (M18)."""
+        ...
 
     async def lock(self) -> None:
         """Drop every cached token and endpoint (M7)."""
         ...
+
+
+#: What a `modgudr.credential_providers` entry point names: a class or function taking the
+#: context, called once at broker start.
+ProviderFactory = Callable[[ProviderContext], CredentialProvider]

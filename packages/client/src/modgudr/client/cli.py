@@ -12,6 +12,7 @@ asks the broker for the target's operations (`describe`) and parses the argument
     modgudr explain <target> <op> …
     modgudr actions <type> | policy show <target> | policy lint | status [--quiet|--json]
     modgudr unlock | lock | audit tail [...]        (human.sock only)
+    modgudr login azure <target> [--device-code]   (human.sock only)
 
 Messages of `modgudr` itself go to stderr. Exit codes are M5's.
 """
@@ -20,6 +21,8 @@ import argparse
 import importlib.resources
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -38,7 +41,14 @@ from modgudr.client.agent.setup import (
     run_setup,
 )
 from modgudr.client.api import truncation_note
-from modgudr.client.errors import BrokerUnavailable, Error, LimitExceeded, Throttled, UsageError
+from modgudr.client.errors import (
+    BrokerUnavailable,
+    Error,
+    LimitExceeded,
+    Throttled,
+    UpstreamError,
+    UsageError,
+)
 from modgudr.client.params import parse_cli_params
 from modgudr.client.protocol import (
     PROTOCOL_VERSION,
@@ -70,8 +80,6 @@ EXIT_CONFIG = 78
 EXIT_INTERRUPTED = 130
 EXIT_PIPE = 141
 
-LATER = "added in a later step"
-
 USAGE = """\
 usage: modgudr <command> [options]
        modgudr <target> <op> [arguments]
@@ -88,6 +96,8 @@ commands:
   status [--quiet|--json]           broker state (--quiet: exit 0 unlocked, 3 locked, 6 down)
   unlock | lock                     the store session (your own terminal only)
   audit tail [options]              recent audit records (your own terminal only)
+  login azure <target> [--device-code]
+                                    the Azure CLI login of a custody target (your own terminal)
   agent-setup claude [--out DIR]    generate the Claude Code managed settings and hook
   agent run claude [--env E] [--pass-env NAME]... [-- ARGS]
                                     start Claude Code with a clean environment
@@ -254,6 +264,9 @@ def cmd_targets(argv: Sequence[str]) -> int:
         for t in data["targets"]
     ]
     _print_table(["NAME", "TYPE", "ENV", "TIER", "MODE", "OPS"], rows)
+    for target in data["targets"]:
+        for problem in target.get("problems", []):
+            _note(f"warning: target {target['name']}: {problem}")
     if data.get("warning"):
         _note(f"warning: {data['warning']}")
     return EXIT_OK
@@ -349,14 +362,27 @@ def cmd_describe(argv: Sequence[str]) -> int:
         f"destinations: {', '.join(data['destinations']) or 'none'}",
         "limits: " + ", ".join(f"{k}={v}" for k, v in data["limits"].items()),
         f"pins: {data['pins']}  scrub: {data['scrub']}",
-        "operations:",
     ]
+    facts = _facts_line(data)
+    if facts:
+        lines.append(facts)
+    lines += [f"problem: {problem}" for problem in data.get("problems", [])]
+    lines.append("operations:")
     for desc in ops.values():
         lines.append(f"  {desc.usage()}")
         if desc.help:
             lines.append(f"      {desc.help}")
     sys.stdout.write("\n".join(lines) + "\n")
     return EXIT_OK
+
+
+def _facts_line(data: Mapping[str, Any]) -> str | None:
+    """A target's facts (`endpoint=not fetched, kubectl=/usr/local/bin/kubectl`), if any."""
+    facts: Mapping[str, Any] = data.get("facts") or {}
+    if not facts:
+        return None
+    shown = ("none" if value is None else str(value) for value in facts.values())
+    return "facts: " + ", ".join(f"{key}={text}" for key, text in zip(facts, shown, strict=True))
 
 
 def cmd_actions(argv: Sequence[str]) -> int:
@@ -427,6 +453,7 @@ def cmd_status(argv: Sequence[str]) -> int:
         lines.append(f"policy: {policy['message']}")
     if data.get("auditDegraded"):
         lines.append("audit: DEGRADED; new calls are refused until a test write succeeds")
+    lines += [f"problem: {problem}" for problem in data.get("problems", [])]
     sys.stdout.write("\n".join(lines) + "\n")
     if data.get("warning"):
         _note(f"warning: {data['warning']}")
@@ -488,6 +515,46 @@ def cmd_lock(argv: Sequence[str]) -> int:
     data = _admin_result("lock")
     cancelled = data.get("cancelled", 0)
     _note(f"locked ({cancelled} calls cancelled)" if cancelled else "locked")
+    return EXIT_OK
+
+
+def cmd_login(argv: Sequence[str]) -> int:
+    parser = _parser(
+        "login",
+        "Log in for a custody target: the broker's own login, kept under MODGUDR_HOME "
+        "(your own terminal only).",
+    )
+    sub = parser.add_subparsers(dest="provider", required=True, metavar="azure")
+    azure = sub.add_parser(
+        "azure",
+        help="run `az login` into the custody directory of a target",
+        description="Run `az login` with AZURE_CONFIG_DIR set to the target's custody directory, "
+        "in this terminal.",
+    )
+    azure.add_argument("target", help="a target name or system@env")
+    azure.add_argument(
+        "--device-code", action="store_true", help="log in with a device code (--use-device-code)"
+    )
+    ns = parser.parse_args(list(argv))
+    # `human.sock` first (exit 6 when it cannot be reached), then the custody directory.
+    data = _admin_result("login-info", {"target": ns.target})
+    if data.get("provider") != "azure-cli":
+        raise UsageError(
+            f"target {data.get('target')} uses the credential provider "
+            f"{data.get('provider')!r}, not azure-cli"
+        )
+    state_dir = str(data["stateDir"])
+    az = shutil.which("az")
+    if az is None:
+        raise UpstreamError("az (the Azure CLI) is not on your PATH; install it first")
+    command = [az, "login", *(["--use-device-code"] if ns.device_code else [])]
+    environ = dict(os.environ)
+    environ["AZURE_CONFIG_DIR"] = state_dir
+    _note(f"logging in for target {data['target']}; the login is kept in {state_dir}")
+    code = subprocess.call(command, env=environ)
+    if code != 0:
+        raise UpstreamError(f"az login failed (exit {code})")
+    _note(f"logged in for target {data['target']}")
     return EXIT_OK
 
 
@@ -612,14 +679,6 @@ def cmd_agent_docs(argv: Sequence[str]) -> int:
     return EXIT_OK
 
 
-def _later(name: str) -> Callable[[Sequence[str]], int]:
-    def stub(argv: Sequence[str]) -> int:
-        _note(f"{name}: {LATER}")
-        return EXIT_USAGE
-
-    return stub
-
-
 COMMANDS: Mapping[str, Callable[[Sequence[str]], int]] = {
     "targets": cmd_targets,
     "describe": cmd_describe,
@@ -629,7 +688,7 @@ COMMANDS: Mapping[str, Callable[[Sequence[str]], int]] = {
     "unlock": cmd_unlock,
     "lock": cmd_lock,
     "audit": cmd_audit,
-    "login": _later("login"),
+    "login": cmd_login,
     "agent-setup": cmd_agent_setup,
     "agent": cmd_agent,
     "doctor": cmd_doctor,
@@ -847,6 +906,9 @@ def cmd_explain(argv: Sequence[str]) -> int:
             f"constraint: {constraint['name']}={constraint['value']} "
             f"({constraint['layer']}, {constraint['source']})"
         )
+    facts = _facts_line(data)
+    if facts:
+        lines.append(facts)
     sys.stdout.write("\n".join(lines) + "\n")
     return EXIT_OK
 

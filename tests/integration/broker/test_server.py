@@ -315,13 +315,17 @@ async def test_admin_ops_are_refused_on_agent_sock(env: BrokerEnv, broker: Broke
     assert result_data(await call(env.agent_socket, "status"))["state"] == "locked"
 
 
-@pytest.mark.parametrize("op", ["login-info"])
-async def test_admin_ops_on_human_sock_have_no_handler_yet(
-    env: BrokerEnv, broker: Broker, op: str
+async def test_login_info_needs_a_target_with_a_custody_login(
+    env: BrokerEnv, broker: Broker
 ) -> None:
-    err = error(await call(env.human_socket, op))
-    assert err["code"] == "bad_request"
-    assert "not implemented" in str(err["message"])
+    missing = error(await call(env.human_socket, "login-info"))
+    assert missing["code"] == "bad_request"
+    assert "needs the argument 'target'" in str(missing["message"])
+    unknown = error(await call(env.human_socket, "login-info", args={"target": "nosuch"}))
+    assert unknown["code"] == "not_found"
+    secret = error(await call(env.human_socket, "login-info", args={"target": "echo-test"}))
+    assert secret["code"] == "bad_request"
+    assert "has no credential provider" in str(secret["message"])
     assert result_data(await call(env.agent_socket, "status"))["state"] == "locked"
 
 

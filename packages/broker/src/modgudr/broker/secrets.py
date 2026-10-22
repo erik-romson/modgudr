@@ -99,6 +99,11 @@ def call_scope(scope: CallScope) -> Generator[None]:
         _SCOPE.reset(token)
 
 
+def current_scope() -> CallScope | None:
+    """The scope of the executing call this task belongs to, if any."""
+    return _SCOPE.get()
+
+
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()
 

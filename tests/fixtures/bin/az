@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""A fake `az` for the tests (step 18). It never reads FAKE_* variables, nor anything under HOME.
+
+The scenario comes from `fake-scenario.json` beside this file, under the key "az":
+  logged_in   the logins that work: "borrowed" (AZURE_CONFIG_DIR unset) and custody directories
+              exactly as AZURE_CONFIG_DIR names them; default ["borrowed"]
+  token       the accessToken of `account get-access-token`
+  expires_in  seconds from now until that token expires (default 3600)
+  server      the API server URL in the kubeconfig `rest … listClusterUserCredential` returns
+  user_token  a static user token in that kubeconfig (a cluster without Entra ID)
+  fail_rest   stderr text (or true for a default line) and exit 1 for `rest`
+  fail_token  the same for `account get-access-token`
+Not logged in, both commands say "Please run 'az login' to setup account." and exit 1.
+`login [--use-device-code]` succeeds. Each run appends one JSON line (tool, argv, cwd, pid and
+the full environment) to `fake-log.jsonl`.
+"""
+
+import base64
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+AKS_SERVER_APP = "6dae42f8-4368-4678-94ff-3960e28e3630"
+CA_PEM = "-----BEGIN CERTIFICATE-----\nMIIBfakeCAforModgudrTests\n-----END CERTIFICATE-----\n"
+CA_DATA = base64.b64encode(CA_PEM.encode()).decode()
+
+
+def log(entry):
+    with open(HERE / "fake-log.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def scenario():
+    try:
+        document = json.loads((HERE / "fake-scenario.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    value = document.get("az", {}) if isinstance(document, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def fail(text, code=1):
+    print(text, file=sys.stderr)
+    return code
+
+
+def option(argv, name):
+    if name in argv:
+        index = argv.index(name)
+        if index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
+def kubeconfig(plan):
+    server = plan.get("server", "https://aks-test-dns-00000000.hcp.westeurope.azmk8s.io:443")
+    if plan.get("user_token"):
+        user = (
+            "  user:\n"
+            "    client-certificate-data: Y2VydA==\n"
+            "    client-key-data: a2V5\n"
+            f"    token: {plan['user_token']}\n"
+        )
+    else:
+        user = (
+            "  user:\n"
+            "    exec:\n"
+            "      apiVersion: client.authentication.k8s.io/v1beta1\n"
+            "      args:\n"
+            "      - get-token\n"
+            "      - --login\n"
+            "      - devicecode\n"
+            "      - --server-id\n"
+            f"      - {AKS_SERVER_APP}\n"
+            "      command: kubelogin\n"
+            "      env: null\n"
+        )
+    return (
+        "apiVersion: v1\n"
+        "clusters:\n"
+        "- cluster:\n"
+        f"    certificate-authority-data: {CA_DATA}\n"
+        f"    server: {server}\n"
+        "  name: aks-test\n"
+        "contexts:\n"
+        "- context:\n"
+        "    cluster: aks-test\n"
+        "    user: clusterUser_rg-aks-test_aks-test\n"
+        "  name: aks-test\n"
+        "current-context: aks-test\n"
+        "kind: Config\n"
+        "preferences: {}\n"
+        "users:\n"
+        "- name: clusterUser_rg-aks-test_aks-test\n" + user
+    )
+
+
+def failure(plan, key, default):
+    value = plan.get(key)
+    if value is True:
+        return fail(default)
+    if isinstance(value, str) and value:
+        return fail(value)
+    return None
+
+
+def main():
+    argv = sys.argv[1:]
+    log({"tool": "az", "argv": argv, "cwd": os.getcwd(), "pid": os.getpid(), "env": dict(os.environ)})
+    plan = scenario()
+    if argv[:1] == ["login"]:
+        print("fake az: logged in", file=sys.stderr)
+        return 0
+    login = os.environ.get("AZURE_CONFIG_DIR") or "borrowed"
+    logged_in = login in plan.get("logged_in", ["borrowed"])
+    if argv[:2] == ["account", "get-access-token"]:
+        if not logged_in:
+            return fail("ERROR: Please run 'az login' to setup account.")
+        failed = failure(plan, "fail_token", "ERROR: the token service is unavailable")
+        if failed is not None:
+            return failed
+        if option(argv, "--resource") != AKS_SERVER_APP or option(argv, "-o") != "json":
+            return fail("fake az: unexpected get-access-token arguments", 2)
+        expires = int(time.time()) + int(plan.get("expires_in", 3600))
+        print(
+            json.dumps(
+                {
+                    "accessToken": plan.get("token", "no-token-in-scenario"),
+                    "expiresOn": time.strftime("%Y-%m-%d %H:%M:%S.000000", time.localtime(expires)),
+                    "expires_on": expires,
+                    "subscription": "0b1f6471-1bf0-4dda-aec3-111122223333",
+                    "tenant": "72f988bf-0000-4000-8000-000000000000",
+                    "tokenType": "Bearer",
+                }
+            )
+        )
+        return 0
+    if argv[:1] == ["rest"]:
+        if not logged_in:
+            return fail("ERROR: Please run 'az login' to setup account.")
+        failed = failure(plan, "fail_rest", "ERROR: (ResourceNotFound) the cluster was not found")
+        if failed is not None:
+            return failed
+        url = option(argv, "--url") or ""
+        if option(argv, "--method") != "post" or "/listClusterUserCredential?" not in url:
+            return fail("fake az: unexpected rest arguments", 2)
+        value = base64.b64encode(kubeconfig(plan).encode()).decode()
+        print(json.dumps({"kubeconfigs": [{"name": "clusterUser", "value": value}]}))
+        return 0
+    return fail("fake az: unsupported arguments: " + " ".join(argv), 2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

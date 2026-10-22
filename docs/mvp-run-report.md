@@ -66,3 +66,14 @@
   "any list containing `secrets`". The classifier applies it to every verb (`delete secret x`,
   `create secret …`, `label secret x … -o yaml`, `logs secret/x`, `explain secrets`), because a write that
   prints the object (`-o yaml`) shows its data. These calls are never allowed.
+- **Step 18, a failed process's exit code rides on the `error` frame.** M5 puts the raw exit code of a failed
+  `kubectl` "in the trailer", but M4 says an error line replaces the trailer. The `error` frame of a failed call
+  therefore carries `exitCode` when the connector reported one, the message says "kubectl exited with code N", and
+  the completion record has `exitCode` as well.
+- **Step 18, `az rest` also gets `-o json`.** M18's endpoint command has no output flag. In the `borrowed` tier
+  `az` reads the developer's own `~/.azure/config`, whose `core.output` may be `table` or `yaml`, which the parser
+  would refuse. `-o json` pins the format, as M18 already does for `az account get-access-token`.
+- **Step 18, `--allow-truncated` on the `kubectl` op.** The client decides per operation whether an op is a read
+  (an op without `--dry-run`), and the `kubectl` passthrough op is classified per call. So `--allow-truncated` also
+  turns a timed-out kubectl write (for example a `delete` that hangs) into exit 0, while M5 limits it to reads. The
+  broker still ends the call `timeout` and records it `cancelled: timeout`; only the client's exit code differs.

@@ -28,6 +28,7 @@ from modgudr.spi import (
     Rule,
     RuleSet,
     Secrets,
+    TargetContext,
     UpstreamFailure,
 )
 
@@ -204,7 +205,9 @@ class EchoConnector:
             return Action.unknown(TYPE, f"op {call.op!r} is not an echo op")
         return Action(f"{TYPE}:{call.op}", risk)
 
-    async def open(self, name: str, config: BaseModel, secrets: Secrets | None) -> EchoTarget:
+    async def open(
+        self, name: str, config: BaseModel, secrets: Secrets | None, *, context: TargetContext
+    ) -> EchoTarget:
         if not isinstance(config, EchoConfig):
             raise TypeError("not an echo config")
         target = EchoTarget(name, config, secrets)

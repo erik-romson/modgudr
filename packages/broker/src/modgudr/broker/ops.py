@@ -10,7 +10,7 @@ the effective environment (phase 2), the decision record, execution, then the tr
 and the completion record.
 
 The admin ops `unlock` and `lock` drive the store session (M7); `audit-tail` streams the audit
-log (M9); `login-info` arrives in a later step.
+log (M9); `login-info` tells `modgudr login` where a target's custody login lives (M18).
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from .pins import PinError
 from .policy.lint import lint_policy
 from .policy.resolve import Resolved, ResolveError, resolve_target
 from .scrub import CallScrubber
-from .secrets import CallScope, Latched, LoginFailed, SessionLocked, call_scope
+from .secrets import CallScope, SessionLocked, call_scope
 from .server import Channel
 from .session import LockReason
 from .sink import LimitedSink, LimitReached
@@ -490,6 +490,7 @@ class Dispatcher:
         self._admin_ops: dict[str, AdminHandler] = {
             "unlock": self._unlock,
             "lock": self._lock,
+            "login-info": self._login_info,
         }
 
     async def serve(self, conn: Connection) -> None:
@@ -572,6 +573,7 @@ class Dispatcher:
         rule: str | None = None,
         retry_after: float | None = None,
         scrub: CallScrubber | None = None,
+        exit_code: int | None = None,
     ) -> None:
         scrubber = scrub or self.b.scrubber.call()
         frame: dict[str, object] = {
@@ -586,6 +588,9 @@ class Dispatcher:
             frame["rule"] = rule
         if retry_after is not None:
             frame["retryAfter"] = retry_after
+        if exit_code is not None:
+            # The error replaces the trailer (M4), so it carries a process's raw exit code (M5).
+            frame["exitCode"] = exit_code
         with contextlib.suppress(ClientGone):
             await conn.send(frame)
 
@@ -755,6 +760,16 @@ class Dispatcher:
         }
         return data, outcome.audit_id
 
+    async def _login_info(
+        self, request: Request, audit_id: str, fields: Mapping[str, object]
+    ) -> tuple[dict[str, object], str | None]:
+        """Where a target's custody login lives, for `modgudr login` (M18). It contacts nothing,
+        works while locked, and writes a record only when it is refused."""
+        self._meta_args(request, ("target",))
+        name = cast("str", self._str_arg(request, "target", required=True))
+        _, target = self._resolve(name, request.env)
+        return self.b.login_info(target), None
+
     async def _broker_op(self, conn: Connection, request: Request, audit_id: str) -> None:
         handler = self._meta.get(request.op)
         if handler is None:
@@ -880,6 +895,8 @@ class Dispatcher:
             "explanation": explain(decision),
             "constraints": _constraints_json(decision),
             "effectiveEnv": self.b.pin_fact(target),
+            "destinations": target.live_destinations(),
+            "facts": target.facts(),
         }
 
     async def _actions(self, conn: Connection, request: Request) -> dict[str, object]:
@@ -1225,6 +1242,8 @@ class Execution:
             outcome = self._outcome(task, flight)
             if outcome.kind == "completed":
                 outcome = await self._finish()
+            elif outcome.kind == "failed":
+                outcome = await self._flush(outcome)
             return outcome
         finally:
             watcher.cancel()
@@ -1261,10 +1280,10 @@ class Execution:
             )
         if isinstance(exc, AuthFailed):
             return _Outcome("failed", None, "upstream", f"authentication failed: {exc}", "exec")
-        if isinstance(exc, LoginFailed | Latched):
-            return _Outcome("failed", None, "upstream", str(exc), exc.stage)
         if isinstance(exc, UpstreamFailure):
-            return _Outcome("failed", None, "upstream", str(exc), "exec")
+            # `login` for a latched or failed login, `provider.endpoint`/`provider.token` for a
+            # provider (M18), else `exec`.
+            return _Outcome("failed", None, "upstream", str(exc), exc.stage)
         return _Outcome(
             "failed",
             None,
@@ -1293,6 +1312,17 @@ class Execution:
         except ClientGone:
             return self._cancelled("client")
         return _Outcome("completed")
+
+    async def _flush(self, outcome: _Outcome) -> _Outcome:
+        """A failed call: what its text streams still hold (a process's stderr) goes out, scrubbed,
+        before the error. A byte limit reached here keeps the error."""
+        try:
+            await self.sink.finish()
+        except LimitReached:
+            pass
+        except ClientGone:
+            return self._cancelled("client")
+        return outcome
 
     async def _respond(self, outcome: _Outcome) -> None:
         sink = self.sink
@@ -1330,6 +1360,7 @@ class Execution:
                 layer=outcome.layer,
                 rule=outcome.rule,
                 scrub=self.scrub,
+                exit_code=sink.exit_code,
             )
         if outcome.kind in ("failed", "cancelled") and outcome.cancelled != "client":
             log.warning(
@@ -1353,7 +1384,9 @@ class Execution:
             committed=sink.committed,
             dryRun=sink.dry_run,
             exitCode=sink.exit_code,
-            destination=self.target.destination_text(),
+            destination=(
+                sink.destination if sink.destination is not None else self.target.destination_text()
+            ),
             error=(
                 {"code": outcome.code, "message": message} if outcome.code is not None else None
             ),

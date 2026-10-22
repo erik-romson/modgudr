@@ -6,6 +6,12 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = ["modgudr-broker"]
 
+[project.entry-points."modgudr.connectors"]
+kubectl = "modgudr.kubectl.connector:KubectlConnector"
+
+[project.entry-points."modgudr.credential_providers"]
+azure-cli = "modgudr.kubectl.provider_azure_cli:AzureCliProvider"
+
 [tool.uv.sources]
 modgudr-broker = { workspace = true }
 

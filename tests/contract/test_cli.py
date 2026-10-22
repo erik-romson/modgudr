@@ -380,10 +380,15 @@ def test_help_exits_0_and_option_errors_exit_64(served: BrokerThread) -> None:
     assert cli(env, "targets", "--sys", "x").returncode == 64  # no abbreviations
 
 
-@pytest.mark.parametrize("command", ["login"])
-def test_later_commands_are_stubs(served: BrokerThread, command: str) -> None:
-    done = cli(served.env, command)
-    assert done.returncode == 64 and "added in a later step" in done.stderr
+def test_login_usage_and_a_target_without_a_custody_login(served: BrokerThread) -> None:
+    env = served.env
+    assert cli(env, "login").returncode == 64
+    assert cli(env, "login", "azure").returncode == 64
+    assert cli(env, "login", "nosuch", "echo-test").returncode == 64
+    done = cli(env, "login", "azure", "echo-test")
+    assert done.returncode == 64
+    assert "target echo-test has no credential provider" in done.stderr
+    assert cli(env, "login", "azure", "nosuch").returncode == 64
 
 
 # --- admin commands ----------------------------------------------------------------------------
@@ -406,7 +411,7 @@ def test_admin_commands_without_human_sock_say_agent_session(served: BrokerThrea
     other = make_shortdir()
     try:
         environ = cli_environ(served.env, MODGUDR_HOME=other)
-        for args in (("unlock",), ("lock",), ("audit", "tail")):
+        for args in (("unlock",), ("lock",), ("audit", "tail"), ("login", "azure", "echo-test")):
             done = run_cli(environ, *args)
             assert done.returncode == 6, args
             assert "admin commands are not available from an agent session" in done.stderr
@@ -423,7 +428,7 @@ def test_admin_commands_with_the_broker_down_say_so(shortdir: Path) -> None:
         "MODGUDR_HOME": str(shortdir / "h"),
         "MODGUDR_SOCKET": str(shortdir / "none.sock"),
     }
-    for args in (("unlock",), ("lock",), ("audit", "tail")):
+    for args in (("unlock",), ("lock",), ("audit", "tail"), ("login", "azure", "aks-test")):
         done = run_cli(environ, *args)
         assert done.returncode == 6
         assert "broker not running; start it in your own terminal" in done.stderr

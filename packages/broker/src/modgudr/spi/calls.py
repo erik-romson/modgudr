@@ -130,6 +130,9 @@ class ResultSink(Protocol):
         committed: bool | None = None,
         dry_run: bool | None = None,
         exit_code: int | None = None,
+        destination: str | None = None,
     ) -> None:
-        """Facts for the trailer of a write or a process (M4)."""
+        """Facts for the trailer of a write or a process (M4). `destination` is the host:port
+        the call used, for the completion record (M9), when the target learns it only while
+        the call runs (an AKS server, M18)."""
         ...

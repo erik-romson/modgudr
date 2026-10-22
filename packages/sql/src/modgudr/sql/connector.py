@@ -35,6 +35,7 @@ from modgudr.spi import (
     RuleSet,
     Secrets,
     SqlDialect,
+    TargetContext,
     TypedParam,
 )
 
@@ -157,7 +158,9 @@ class SqlConnector:
             return Action.unknown(TYPE, str(exc))
         return ops.apply_contract(call.op, backend.classify(prepared.text))
 
-    async def open(self, name: str, config: BaseModel, secrets: Secrets | None) -> SqlTarget:
+    async def open(
+        self, name: str, config: BaseModel, secrets: Secrets | None, *, context: TargetContext
+    ) -> SqlTarget:
         if secrets is None:
             raise ValueError(f"sql target {name} needs a secret, not a provider")
         sql = _sql_config(config)

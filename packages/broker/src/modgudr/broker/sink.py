@@ -71,6 +71,8 @@ class LimitedSink:
         self.committed: bool | None = None
         self.dry_run: bool | None = None
         self.exit_code: int | None = None
+        #: The host:port the call used, when the target reported it.
+        self.destination: str | None = None
         #: Why the call was truncated, for the audit record (the largest cell is named).
         self.limit_message: str | None = None
 
@@ -118,6 +120,7 @@ class LimitedSink:
         committed: bool | None = None,
         dry_run: bool | None = None,
         exit_code: int | None = None,
+        destination: str | None = None,
     ) -> None:
         if affected_rows is not None:
             self.affected_rows = affected_rows
@@ -127,6 +130,8 @@ class LimitedSink:
             self.dry_run = dry_run
         if exit_code is not None:
             self.exit_code = exit_code
+        if destination is not None:
+            self.destination = destination
 
     async def _emit_text(self, stream: str, data: str) -> None:
         if not data:

@@ -1,4 +1,5 @@
-"""Destinations, secret references, resolved secrets and minted tokens (§4.3, §8.4, M8)."""
+"""Destinations, secret references, resolved secrets, cluster endpoints and minted tokens (§4.3,
+§8.4, M8, M18)."""
 
 from __future__ import annotations
 
@@ -63,17 +64,46 @@ class ResolvedSecret:
 
 
 @dataclass(frozen=True)
+class ProviderTarget:
+    """A `provider:` target as its credential provider sees it (§8.4, M18)."""
+
+    name: str
+    #: The target's `system`, else its name: a custody login is kept per system (M18).
+    system: str
+    #: The target's `credential.tier`: `borrowed` uses the developer's own login, `custody` the
+    #: provider's own state directory under `MODGUDR_HOME`.
+    tier: str
+
+
+@dataclass(frozen=True)
+class EndpointRequest:
+    """What a credential provider finds a cluster endpoint for (M18)."""
+
+    target: ProviderTarget
+    #: The cluster as the target's config names it (AKS: `subscription`, `resourceGroup`,
+    #: `name`), as sorted (key, value) pairs.
+    cluster: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
 class TokenRequest:
     """What a credential provider mints a token for (§8.4, M18)."""
 
-    target: str
-    #: The target's `credential.tier`: `borrowed` uses the developer's own login, `custody` the
-    #: broker's own state directory.
-    tier: str
+    target: ProviderTarget
     #: The resource the token is for (the AKS server application id).
     resource: str
-    #: The provider's own state directory (custody), else None.
-    state_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """A cluster's API server as the credential provider found it, never from the policy (M18)."""
+
+    #: The server URL, `https://host[:port]`.
+    server: str
+    #: The cluster CA as base64 PEM (`certificate-authority-data`).
+    ca_data: str = field(repr=False)
+    #: The host and port of `server`: what the target contacts.
+    destination: Destination
 
 
 @dataclass(frozen=True)

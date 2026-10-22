@@ -28,6 +28,7 @@ from modgudr.spi import (
     Rule,
     RuleSet,
     Secrets,
+    TargetContext,
 )
 
 TYPE = "probe"
@@ -159,7 +160,9 @@ class ProbeConnector:
             return Action.unknown(TYPE, f"op {call.op!r} is not a probe op")
         return Action(f"{TYPE}:{call.op}", risk)
 
-    async def open(self, name: str, config: BaseModel, secrets: Secrets | None) -> ProbeTarget:
+    async def open(
+        self, name: str, config: BaseModel, secrets: Secrets | None, *, context: TargetContext
+    ) -> ProbeTarget:
         if not isinstance(config, ProbeConfig):
             raise TypeError("not a probe config")
         return ProbeTarget(name, config)

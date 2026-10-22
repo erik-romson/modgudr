@@ -234,7 +234,8 @@ class _Classified:
 
 # --- verbs -----------------------------------------------------------------------------------
 
-_RESOURCE_RISK: Mapping[str, Risk] = {
+#: The risk of each verb that takes resource types (secrets aside, which are always `secret`).
+RESOURCE_RISK: Mapping[str, Risk] = {
     "get": Risk.READ,
     "describe": Risk.READ,
     "delete": Risk.DESTRUCTIVE,
@@ -243,7 +244,8 @@ _RESOURCE_RISK: Mapping[str, Risk] = {
     "label": Risk.WRITE,
     "annotate": Risk.WRITE,
 }
-_ROLLOUT_RISK: Mapping[str, Risk] = {
+#: The risk of each `rollout` subcommand.
+ROLLOUT_RISK: Mapping[str, Risk] = {
     "history": Risk.READ,
     "status": Risk.READ,
     "pause": Risk.WRITE,
@@ -280,10 +282,10 @@ def _resource_verb(parsed: Parsed, default_namespace: str) -> _Classified:
         raise _Unknown(f"kubectl {verb} needs a resource type, such as pods")
     if verb == "rollout":
         sub = parsed.path[1]
-        name, risk = f"rollout/{sub}", _ROLLOUT_RISK[sub]
+        name, risk = f"rollout/{sub}", ROLLOUT_RISK[sub]
         follow = sub == "status" and parsed.boolean("watch", default=True)
     else:
-        name, risk = _action_name(verb, kinds), _RESOURCE_RISK[verb]
+        name, risk = _action_name(verb, kinds), RESOURCE_RISK[verb]
         follow = verb == "get" and (parsed.boolean("watch") or parsed.boolean("watch-only"))
     return _Classified(name, risk, _facts(parsed, default_namespace, kinds, names, follow=follow))
 

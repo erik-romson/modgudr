@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""A fake `kubectl` for the tests (step 18). It never reads FAKE_* variables, nor anything under
+HOME.
+
+Like the real one, it reads the kubeconfig named by --kubeconfig and runs its user's exec plugin
+for a token. The scenario comes from `fake-scenario.json` beside this file, under "kubectl":
+  expect_token  the token the exec plugin must return
+  output        canned stdout per verb, for example {"get": "NAME ...\n"}
+  stderr        text printed to stderr
+  exit_code     the exit code (default 0)
+  sleep         seconds to sleep after printing, before exiting
+`logs -f`/`--follow` and `get -w`/`--watch` then print a line every 0.1 s until killed.
+Before any of that it checks, and on a failure prints `fake kubectl: …` and exits 96-99:
+  - KUBECONFIG names the --kubeconfig file, and --cache-dir is given;
+  - the kubeconfig holds no token (neither expect_token nor a `token` key);
+  - the exec plugin returns an ExecCredential (client.authentication.k8s.io/v1) with expect_token.
+Each run appends one JSON line (tool, argv, cwd, pid, the full environment and the kubeconfig
+text) to `fake-log.jsonl`.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+API_VERSION = "client.authentication.k8s.io/v1"
+#: Flags that take the next word as their value.
+VALUED = {
+    "--kubeconfig",
+    "--cache-dir",
+    "-n",
+    "--namespace",
+    "-l",
+    "--selector",
+    "-o",
+    "--output",
+    "-c",
+    "--container",
+    "--tail",
+}
+
+
+def log(entry):
+    with open(HERE / "fake-log.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def scenario():
+    try:
+        document = json.loads((HERE / "fake-scenario.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    value = document.get("kubectl", {}) if isinstance(document, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def option(argv, name):
+    if name in argv:
+        index = argv.index(name)
+        if index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
+def verb_of(argv):
+    skip = False
+    for word in argv:
+        if skip:
+            skip = False
+        elif word in VALUED:
+            skip = True
+        elif not word.startswith("-"):
+            return word
+    return ""
+
+
+def has_token_key(node):
+    if isinstance(node, dict):
+        return "token" in node or any(has_token_key(v) for v in node.values())
+    if isinstance(node, list):
+        return any(has_token_key(v) for v in node)
+    return False
+
+
+def fail(text, code):
+    print("fake kubectl: " + text, file=sys.stderr)
+    return code
+
+
+def credential(config):
+    """Run the exec plugin of the kubeconfig's user, as client-go does, and return its token."""
+    user = config["users"][0]["user"]["exec"]
+    if user.get("apiVersion") != API_VERSION or user.get("interactiveMode") != "Never":
+        return None, "the exec plugin is not client.authentication.k8s.io/v1 with Never"
+    env = dict(os.environ)
+    env["KUBERNETES_EXEC_INFO"] = json.dumps(
+        {"apiVersion": API_VERSION, "kind": "ExecCredential", "spec": {"interactive": False}}
+    )
+    done = subprocess.run(
+        [user["command"], *user.get("args", [])],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        timeout=20,
+        check=False,
+    )
+    if done.returncode != 0:
+        return None, f"getting credentials: exec: executable failed with exit code {done.returncode}"
+    try:
+        answer = json.loads(done.stdout)
+        token = answer["status"]["token"]
+    except (ValueError, KeyError, TypeError):
+        return None, "the exec plugin printed no ExecCredential"
+    if answer.get("kind") != "ExecCredential" or answer.get("apiVersion") != API_VERSION:
+        return None, "the exec plugin printed another kind or version"
+    return token, None
+
+
+def main():
+    argv = sys.argv[1:]
+    path = option(argv, "--kubeconfig")
+    text = ""
+    if path:
+        try:
+            text = Path(path).read_text("utf-8")
+        except OSError:
+            text = ""
+    log(
+        {
+            "tool": "kubectl",
+            "argv": argv,
+            "cwd": os.getcwd(),
+            "pid": os.getpid(),
+            "env": dict(os.environ),
+            "kubeconfig": text,
+        }
+    )
+    plan = scenario()
+    if not path or os.environ.get("KUBECONFIG") != path:
+        return fail("KUBECONFIG does not name the --kubeconfig file", 99)
+    if not option(argv, "--cache-dir"):
+        return fail("no --cache-dir", 99)
+    try:
+        config = json.loads(text)
+    except ValueError:
+        return fail("the kubeconfig is not readable", 96)
+    expected = plan.get("expect_token")
+    if (expected and expected in text) or has_token_key(config):
+        return fail("the kubeconfig holds a token", 98)
+    token, problem = credential(config)
+    if problem is not None:
+        print("Unable to connect to the server: " + problem, file=sys.stderr)
+        return 1
+    if token != expected:
+        return fail("the exec plugin returned another token", 97)
+    verb = verb_of(argv)
+    sys.stdout.write(plan.get("output", {}).get(verb, ""))
+    sys.stdout.flush()
+    if plan.get("stderr"):
+        sys.stderr.write(plan["stderr"])
+        sys.stderr.flush()
+    time.sleep(float(plan.get("sleep", 0)))
+    follows = verb == "logs" and ("-f" in argv or "--follow" in argv)
+    watches = verb == "get" and ("-w" in argv or "--watch" in argv)
+    if follows or watches:
+        line = 0
+        while True:
+            line += 1
+            sys.stdout.write(f"streamed line {line}\n")
+            sys.stdout.flush()
+            time.sleep(0.1)
+    return int(plan.get("exit_code", 0))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

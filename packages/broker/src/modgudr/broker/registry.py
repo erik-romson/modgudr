@@ -1,6 +1,8 @@
 """Plugin discovery (§9.3, M24): the four entry-point groups, plus programmatic registration.
 
-The built-in connectors and stores register through the same entry points as third-party plugins.
+The built-in connectors, stores and providers register through the same entry points as
+third-party plugins. Stores and credential providers are factories, called at broker start with
+their context; connectors and dialects are created at discovery.
 `PluginRegistry` implements the policy layer's `PolicyRegistry`, so the loader and lint see every
 registered connector type. Tests register test-only plugins (the echo connector) by hand.
 """
@@ -13,7 +15,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import cast
 
-from ..spi import Connector, CredentialProvider, SqlDialect, StoreFactory
+from ..spi import Connector, ProviderFactory, SqlDialect, StoreFactory
 from .policy.registry import ConnectorPolicy
 
 CONNECTORS = "modgudr.connectors"
@@ -79,7 +81,7 @@ class PluginRegistry:
         self._policies: dict[str, ConnectorPolicy] = {}
         self._dialects: dict[str, SqlDialect] = {}
         self._stores: dict[str, StoreFactory] = {}
-        self._providers: dict[str, CredentialProvider] = {}
+        self._providers: dict[str, ProviderFactory] = {}
         self._origins: list[PluginOrigin] = []
 
     @classmethod
@@ -104,6 +106,9 @@ class PluginRegistry:
         if group == SECRET_STORES:
             self.register_store(name, _as_store_factory(loaded), origin=origin)
             return
+        if group == CREDENTIAL_PROVIDERS:
+            self.register_provider(name, _as_provider_factory(loaded), origin=origin)
+            return
         try:
             instance: object = loaded()
         except Exception as exc:
@@ -115,10 +120,8 @@ class PluginRegistry:
                     f"entry point {group}:{name} provides connector type {connector.type!r}"
                 )
             self.register_connector(connector, origin=origin)
-        elif group == SQL_DIALECTS:
-            self.register_dialect(_as_dialect(instance), origin=origin)
         else:
-            self.register_provider(_as_provider(instance), origin=origin)
+            self.register_dialect(_as_dialect(instance), origin=origin)
 
     # --- programmatic registration ---------------------------------------------------------
 
@@ -151,12 +154,12 @@ class PluginRegistry:
         self._origins.append(origin or PluginOrigin(SECRET_STORES, scheme))
 
     def register_provider(
-        self, provider: CredentialProvider, *, origin: PluginOrigin | None = None
+        self, name: str, factory: ProviderFactory, *, origin: PluginOrigin | None = None
     ) -> None:
-        if provider.name in self._providers:
-            raise PluginError(f"credential provider {provider.name!r} is already registered")
-        self._providers[provider.name] = provider
-        self._origins.append(origin or PluginOrigin(CREDENTIAL_PROVIDERS, provider.name))
+        if name in self._providers:
+            raise PluginError(f"credential provider {name!r} is already registered")
+        self._providers[name] = factory
+        self._origins.append(origin or PluginOrigin(CREDENTIAL_PROVIDERS, name))
 
     # --- the policy layer's interface -------------------------------------------------------
 
@@ -183,8 +186,11 @@ class PluginRegistry:
     def store_schemes(self) -> tuple[str, ...]:
         return tuple(sorted(self._stores))
 
-    def provider(self, name: str) -> CredentialProvider | None:
+    def provider_factory(self, name: str) -> ProviderFactory | None:
         return self._providers.get(name)
+
+    def provider_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._providers))
 
     def origins(self) -> tuple[PluginOrigin, ...]:
         return tuple(sorted(self._origins, key=lambda o: (o.group, o.name)))
@@ -218,8 +224,6 @@ def _as_dialect(instance: object) -> SqlDialect:
     return cast("SqlDialect", instance)
 
 
-def _as_provider(instance: object) -> CredentialProvider:
-    for attr in ("name", "mint", "lock"):
-        if not hasattr(instance, attr):
-            raise PluginError(f"{instance!r} is not a credential provider (no {attr!r})")
-    return cast("CredentialProvider", instance)
+def _as_provider_factory(loaded: object) -> ProviderFactory:
+    # A class or function taking a `ProviderContext`; called once at broker start.
+    return cast("ProviderFactory", loaded)

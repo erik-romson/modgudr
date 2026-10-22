@@ -46,7 +46,11 @@ from ..spi import (
     Decision,
     Destination,
     OperationSpec,
+    ProviderContext,
+    ProviderFactory,
+    ProviderTarget,
     ReportingStore,
+    ReportingTarget,
     SecretRef,
     SecretStore,
     StoreConfigError,
@@ -54,7 +58,9 @@ from ..spi import (
     StoreError,
     StoreFactory,
     Target,
+    TargetContext,
     UnlockRefused,
+    UpstreamFailure,
 )
 from .audit import AuditUnavailable, AuditWriter, new_audit_id
 from .engine.decide import Scope, decide, scope_for
@@ -73,6 +79,7 @@ from .ops import (
 )
 from .policy.load import Fstat, Policy, PolicyError, load_policy
 from .policy.model import TargetConfig
+from .providers import TargetCredentials
 from .registry import PluginError, PluginRegistry
 from .scrub import MIN_DATA_LENGTH, Scrubber
 from .secrets import SecretService, TargetSecrets
@@ -148,6 +155,8 @@ class BrokerConfig:
     #: How policy files are stat'ed after opening: tests inject a root-owned company file, because
     #: `--dev` is refused with the `bws` store (step 03's owner-check seam).
     policy_fstat: Fstat | None = None
+    #: `LANG` and `LC_*` of the broker's environment, for children that get a locale (`az`, M18).
+    locale: Mapping[str, str] = field(default_factory=dict[str, str])
 
     @property
     def human_socket(self) -> Path:
@@ -185,6 +194,7 @@ class BrokerConfig:
             dev=dev,
             user_home=user_home,
             path=environ.get("PATH", ""),
+            locale={k: v for k, v in environ.items() if k == "LANG" or k.startswith("LC_")},
         )
 
 
@@ -209,8 +219,17 @@ class OpenTarget:
             scope = self._scopes[env] = scope_for(policy, self.config, env, self.connector)
         return scope
 
+    def live_destinations(self) -> list[str]:
+        """What the target contacts now: a `provider:` target knows its endpoint only once a
+        call has fetched it (M18)."""
+        return sorted(str(d) for d in self.target.destinations())
+
     def destination_text(self) -> str:
-        return ",".join(str(d) for d in self.destinations)
+        return ",".join(self.live_destinations())
+
+    def facts(self) -> dict[str, object]:
+        target = self.target
+        return dict(target.facts()) if isinstance(target, ReportingTarget) else {}
 
 
 @dataclass(frozen=True)
@@ -255,10 +274,11 @@ def build(config: BrokerConfig) -> Broker:
     for target in policy.targets.values():
         if registry.connector_plugin(target.type) is None:
             raise StartError(f"no connector for type {target.type!r} (target {target.name})")
-        if target.provider is not None and registry.provider(target.provider) is None:
+        if target.provider is not None and registry.provider_factory(target.provider) is None:
+            known = ", ".join(registry.provider_names()) or "none"
             raise StartError(
                 f"target {target.name} names the credential provider {target.provider!r}, "
-                "which is not installed"
+                f"which is not installed; installed: {known}"
             )
     return Broker(config, registry, policy, scheme, factory)
 
@@ -340,6 +360,8 @@ class Broker:
         )
         self._store: SecretStore | None = None
         self._secrets: SecretService | None = None
+        #: The credential providers the targets name, created at start (M18).
+        self.providers: dict[str, CredentialProvider] = {}
         self._unlocking = asyncio.Lock()
         self._locking: asyncio.Task[LockOutcome] | None = None
         self._servers: list[ChannelServer] = []
@@ -405,6 +427,7 @@ class Broker:
         check_socket_path(agent)
         check_socket_path(human)
         self._store = self._make_store(home)
+        self.providers = self._make_providers(home)
         self._secrets = SecretService(
             self._store,
             self.scrubber,
@@ -417,7 +440,7 @@ class Broker:
         except AuditUnavailable as exc:
             raise StartError(str(exc)) from exc
         self._audit_started = True
-        await self._open_targets()
+        await self._open_targets(home)
         self._facts = Facts(
             platform=config.platform,
             home=str(home),
@@ -467,10 +490,39 @@ class Broker:
                 self._warn(warning)
         return store
 
-    async def _open_targets(self) -> None:
+    def _make_providers(self, home: Path) -> dict[str, CredentialProvider]:
+        """One instance of every credential provider a target names (M18)."""
+        context = ProviderContext(
+            home=home,
+            user_home=self.config.user_home,
+            path=self.config.path,
+            locale=dict(self.config.locale),
+        )
+        providers: dict[str, CredentialProvider] = {}
+        for name in sorted({t.provider for t in self.policy.targets.values() if t.provider}):
+            factory = cast("ProviderFactory", self.registry.provider_factory(name))
+            try:
+                providers[name] = factory(context)
+            except Exception as exc:
+                raise StartError(f"the credential provider {name} cannot start: {exc}") from exc
+        return providers
+
+    def _credentials(self, config: TargetConfig) -> TargetCredentials:
+        provider = self.providers[cast("str", config.provider)]
+        tier = config.credential.tier
+        if tier not in provider.tiers:
+            raise StartError(
+                f"target {config.name}: the credential provider {provider.name} serves the tiers "
+                f"{', '.join(sorted(provider.tiers))}, not {tier}"
+            )
+        who = ProviderTarget(config.name, config.system or config.name, tier)
+        return TargetCredentials(provider, who, scrubber=self.scrubber, session=self.session)
+
+    async def _open_targets(self, home: Path) -> None:
         for name, config in self.policy.targets.items():
             connector = cast("Connector", self.registry.connector_plugin(config.type))
             secrets: TargetSecrets | None = None
+            credentials: TargetCredentials | None = None
             if config.secret is not None:
                 secrets = TargetSecrets(
                     self.secrets,
@@ -479,8 +531,11 @@ class Broker:
                     declared_env=config.env,
                     ref=SecretRef.parse(config.secret),
                 )
+            else:
+                credentials = self._credentials(config)
+            context = TargetContext(home=home, path=self.config.path, credentials=credentials)
             try:
-                target = await connector.open(name, config.config, secrets)
+                target = await connector.open(name, config.config, secrets, context=context)
             except Exception as exc:
                 raise StartError(f"target {name} cannot be opened: {exc}") from exc
             if secrets is not None:
@@ -666,8 +721,7 @@ class Broker:
         return LockOutcome(locked=True, cancelled=cancelled, audit_id=audit_id)
 
     def _providers(self) -> list[CredentialProvider]:
-        names = sorted({t.config.provider for t in self.targets.values() if t.config.provider})
-        return [p for p in (self.registry.provider(n) for n in names) if p is not None]
+        return list(self.providers.values())
 
     async def unlock(
         self, credential: str, audit_id: str, fields: Mapping[str, object]
@@ -768,9 +822,23 @@ class Broker:
         """The §4.9 warning when isolation is `none` and the broker runs as the caller's uid."""
         return L0_WARNING if not self._isolation.isolated else None
 
+    def target_problems(self, target: OpenTarget) -> list[str]:
+        """Why calls of this target will fail before they start: a missing executable."""
+        problems: list[str] = []
+        problem = target.facts().get("problem")
+        if isinstance(problem, str):
+            problems.append(problem)
+        provider = self.providers.get(target.config.provider or "")
+        if provider is not None:
+            problem = provider.facts().get("problem")
+            if isinstance(problem, str):
+                problems.append(problem)
+        return problems
+
     def target_summary(self, target: OpenTarget) -> dict[str, object]:
+        """A target for the metadata ops; nothing is contacted (M6, M18)."""
         config = target.config
-        return {
+        data: dict[str, object] = {
             "name": config.name,
             "type": config.type,
             "system": config.system,
@@ -780,9 +848,56 @@ class Broker:
             "credential": "provider" if config.provider is not None else "secret",
             "provider": config.provider,
             "ops": list(target.operations),
-            "destinations": [str(d) for d in target.destinations],
+            "destinations": target.live_destinations(),
             "limits": target.limits.to_json(),
             "pins": self.pin_fact(target),
+        }
+        facts = target.facts()
+        if facts:
+            data["facts"] = facts
+        problems = self.target_problems(target)
+        if problems:
+            data["problems"] = problems
+        return data
+
+    def problems(self) -> list[str]:
+        """Every target problem, for `status`."""
+        return [
+            f"target {name}: {problem}"
+            for name, target in self.targets.items()
+            for problem in self.target_problems(target)
+        ]
+
+    def login_info(self, target: OpenTarget) -> dict[str, object]:
+        """Where the custody login of a `provider:` target lives (`modgudr login`, M18).
+        Raises `Refused` for a target without a custody login."""
+        config = target.config
+        provider = self.providers.get(config.provider or "")
+        if provider is None:
+            raise Refused(
+                "bad_request",
+                f"target {config.name} has no credential provider; there is nothing to log in to",
+                record=None,
+            )
+        who = ProviderTarget(config.name, config.system or config.name, config.credential.tier)
+        try:
+            state_dir = provider.state_dir(who)
+        except UpstreamFailure as exc:
+            raise Refused("internal", str(exc), record=None) from None
+        if state_dir is None:
+            raise Refused(
+                "bad_request",
+                f"target {config.name} uses the {config.credential.tier} tier: the broker uses "
+                "your own login, so there is no custody login; log in with the provider's own "
+                "tool in your own terminal (for azure-cli: `az login`)",
+                record=None,
+            )
+        return {
+            "target": config.name,
+            "system": who.system,
+            "provider": provider.name,
+            "tier": config.credential.tier,
+            "stateDir": str(state_dir),
         }
 
     def status(self, conn: Connection, req: Request) -> dict[str, object]:
@@ -812,6 +927,8 @@ class Broker:
             "isolationReasons": list(self._isolation.reasons),
             "managedSettings": list(self._isolation.files),
             "auditDegraded": self.audit.degraded,
+            "providers": {name: dict(p.facts()) for name, p in self.providers.items()},
+            "problems": self.problems(),
             "defaultEnv": {"env": self.policy.default_env, "source": "defaults.env"},
             "environments": [
                 {"name": name, "aliases": list(env.aliases)}
