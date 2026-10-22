@@ -9,6 +9,7 @@ only when every constraint measured after the run is met.
 from __future__ import annotations
 
 import asyncio
+import functools
 import math
 import time
 from collections.abc import Mapping, Sequence
@@ -22,6 +23,7 @@ from modgudr.spi import (
     ActionSpec,
     BadArguments,
     Call,
+    Cell,
     ConstraintBreach,
     ConstraintCheck,
     Destination,
@@ -33,14 +35,18 @@ from modgudr.spi import (
     RuleSet,
     Secrets,
     SqlDialect,
+    TypedParam,
 )
 
 from . import ops
 from .classify import INVARIANTS, TYPE
 from .config import SqlConfig
 from .constraints import MaxAffectedRows, RequireWhere
-from .driver import Driver, Session, SessionDead, Statement, StatementError
+from .driver import CellTooLarge, Driver, Session, SessionDead, Statement, StatementError
 from .pool import SessionPool, dispose
+
+#: What a driver binds: values by position (`numeric` placeholders) or by name (`named`).
+Binds = Sequence[object] | Mapping[str, object]
 
 #: Rows fetched from the driver per round trip to a worker thread.
 FETCH_ROWS = 256
@@ -92,9 +98,10 @@ class DialectBackend(SqlDialect, Protocol):
 
 
 def builtin_dialects() -> dict[str, DialectBackend]:
+    from .dialects.oracle import OracleDialect
     from .dialects.snowflake import SnowflakeDialect
 
-    return {"snowflake": SnowflakeDialect()}
+    return {"snowflake": SnowflakeDialect(), "oracle": OracleDialect()}
 
 
 def _sql_config(config: BaseModel) -> SqlConfig:
@@ -194,19 +201,25 @@ class SqlTarget:
 
     async def execute(self, call: Call, sink: ResultSink) -> None:
         bound = ops.bind_call(call, self._backend)
-        params = [self._backend.bind_value(p) for p in bound.params]
+        params = self._binds(bound.params)
         if call.op == "write":
             await self._write(call, sink, bound.sql, params)
         else:
             await self._read(call, sink, bound.sql, params)
 
-    async def _read(self, call: Call, sink: ResultSink, sql: str, params: list[object]) -> None:
+    def _binds(self, params: Sequence[TypedParam]) -> Binds:
+        """The values the driver binds: by name for `named` placeholders, else by position."""
+        if self._backend.bind_style == "named":
+            return {p.name: self._backend.bind_value(p) for p in params}
+        return [self._backend.bind_value(p) for p in params]
+
+    async def _read(self, call: Call, sink: ResultSink, sql: str, params: Binds) -> None:
         session, statement = await self._run(call, sql, params, retry=True)
         held: Session | None = session
         try:
             try:
                 await sink.header(statement.columns)
-                while rows := await asyncio.to_thread(statement.fetch, FETCH_ROWS):
+                while rows := await self._fetch(statement, sink):
                     for row in rows:
                         await sink.row(row)
             except LimitReached:
@@ -219,13 +232,19 @@ class SqlTarget:
             if held is not None:
                 self._pool.discard(held)
 
+    async def _fetch(self, statement: Statement, sink: ResultSink) -> Sequence[Sequence[Cell]]:
+        try:
+            return await asyncio.to_thread(statement.fetch, FETCH_ROWS, sink.room)
+        except CellTooLarge as exc:
+            sink.cell_too_large(exc.column, exc.size)
+
     async def _end_read(self, session: Session, statement: Statement) -> None:
         """Close the cursor and roll back the read's transaction, then pool the session."""
         await asyncio.to_thread(statement.close)
         await asyncio.to_thread(session.rollback)
         self._pool.release(session)
 
-    async def _write(self, call: Call, sink: ResultSink, sql: str, params: list[object]) -> None:
+    async def _write(self, call: Call, sink: ResultSink, sql: str, params: Binds) -> None:
         dry_run = bool(call.args.get("dryRun", False))
         sink.report(committed=False, dry_run=dry_run)
         session, statement = await self._run(call, sql, params, retry=False)
@@ -288,7 +307,7 @@ class SqlTarget:
         return None
 
     async def _run(
-        self, call: Call, sql: str, params: list[object], *, retry: bool
+        self, call: Call, sql: str, params: Binds, *, retry: bool
     ) -> tuple[Session, Statement]:
         """Check out a session and start the statement. A read whose pooled session died
         reconnects once (M14); a statement the server refused leaves a healthy session."""
@@ -297,7 +316,15 @@ class SqlTarget:
             session = await self._pool.acquire(lambda: self._open(call))
             try:
                 statement = await asyncio.to_thread(
-                    session.run, sql, params, timeout=_remaining(call), tag=call.audit_id
+                    functools.partial(
+                        session.run,
+                        sql,
+                        params,
+                        timeout=_remaining(call),
+                        tag=call.audit_id,
+                        op=call.op,
+                        schema=ops.schema_of(call),
+                    )
                 )
             except SessionDead:
                 self._pool.discard(session)

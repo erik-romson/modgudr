@@ -26,16 +26,54 @@ def test_a_snowflake_target() -> None:
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ({"dialect": "oracle"}, "unknown sql dialect 'oracle'; available: snowflake"),
+        ({"dialect": "db2"}, "unknown sql dialect 'db2'; available: oracle, snowflake"),
         ({"account": None}, "needs account"),
         ({"user": None, "role": None}, "needs role, user"),
-        ({"host": "x.example.net"}, "unknown key|Extra inputs"),
+        ({"host": "x.example.net"}, "dialect snowflake takes no host"),
         ({"account": "evil.com/x"}, "not a Snowflake account identifier"),
     ],
 )
 def test_bad_targets_are_refused(change: dict[str, object], message: str) -> None:
     data = {**BASE, **change}
     data = {k: v for k, v in data.items() if v is not None}
+    with pytest.raises(ValidationError, match=message):
+        SqlConfig.model_validate(data)
+
+
+ORACLE = {"dialect": "oracle", "host": "db.example.net", "user": "APP_RO", "service": "SVC"}
+
+
+def test_an_oracle_target() -> None:
+    config = SqlConfig.model_validate(ORACLE)
+    assert (config.host, config.port, config.service, config.sid) == (
+        "db.example.net",
+        None,
+        "SVC",
+        None,
+    )
+    sid = SqlConfig.model_validate({**ORACLE, "service": None, "sid": "FREE", "port": 1522})
+    assert (sid.sid, sid.service, sid.port) == ("FREE", None, 1522)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"service": None}, "exactly one of service and sid"),
+        ({"sid": "FREE"}, "exactly one of service and sid"),
+        ({"host": None}, "needs host"),
+        ({"user": None}, "needs user"),
+        ({"host": "(DESCRIPTION=(ADDRESS=(HOST=x)))"}, "not a host name"),
+        ({"host": "db.example.net:1521/SVC"}, "not a host name"),
+        ({"host": "//db.example.net"}, "not a host name"),
+        ({"service": "SVC)(X"}, "not a service name"),
+        ({"port": 0}, "greater than or equal to 1"),
+        ({"port": 70000}, "less than or equal to 65535"),
+        ({"account": "acme"}, "dialect oracle takes no account"),
+        ({"schema": "APP"}, "dialect oracle takes no schema"),
+    ],
+)
+def test_bad_oracle_targets_are_refused(change: dict[str, object], message: str) -> None:
+    data = {k: v for k, v in {**ORACLE, **change}.items() if v is not None}
     with pytest.raises(ValidationError, match=message):
         SqlConfig.model_validate(data)
 

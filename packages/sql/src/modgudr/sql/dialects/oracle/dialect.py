@@ -8,12 +8,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from modgudr.spi import Action, BindStyle, Risk, TypedParam
 from modgudr.sql.binds import BindError, parse_value
 from modgudr.sql.classify import classify
 
 from .catalogue import FUNCTIONS, OBJECTS, RULES, SQLGLOT_DIALECT
+
+if TYPE_CHECKING:
+    from modgudr.sql.config import SqlConfig
+    from modgudr.sql.driver import Driver
 
 
 class OracleDialect:
@@ -67,3 +72,10 @@ class OracleDialect:
 
     def sample_query(self) -> str:
         return "select * from {table} fetch first {n} rows only"
+
+    def driver(self, config: SqlConfig) -> Driver:
+        """The driver adapter of a target. `oracledb` is imported here, not at start, so
+        classifying works without the `oracle` extra."""
+        from .driver_oracle import OracleDriver
+
+        return OracleDriver(config)

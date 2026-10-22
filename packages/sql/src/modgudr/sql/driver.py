@@ -8,7 +8,7 @@ into a message they choose.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Protocol
 
 from modgudr.spi import Cell, Column, Destination, UpstreamFailure
@@ -22,6 +22,17 @@ class StatementError(UpstreamFailure):
     """The server refused the statement; the session is still healthy."""
 
 
+class CellTooLarge(Exception):
+    """One cell cannot be sent within the bytes left of `maxBytes`: the connector ends the call
+    with `limit` naming `column`. Nothing of the cell was read, or the read stopped at the
+    budget. `size` is the encoded size, or a lower bound of it."""
+
+    def __init__(self, column: str, size: int) -> None:
+        super().__init__(f"column {column!r} holds at least {size} bytes")
+        self.column = column
+        self.size = size
+
+
 class Statement(Protocol):
     @property
     def columns(self) -> Sequence[Column]: ...
@@ -31,18 +42,29 @@ class Statement(Protocol):
         """Rows a DML statement changed; None when the driver cannot say."""
         ...
 
-    def fetch(self, size: int) -> Sequence[Sequence[Cell]]:
-        """At most `size` encoded rows; empty at the end."""
+    def fetch(self, size: int, budget: int) -> Sequence[Sequence[Cell]]:
+        """At most `size` encoded rows; empty at the end. `budget` is the bytes of `maxBytes`
+        still free: a driver that streams large objects stops at it with `CellTooLarge`."""
         ...
 
     def close(self) -> None: ...
 
 
 class Session(Protocol):
-    def run(self, sql: str, params: Sequence[object], *, timeout: float, tag: str) -> Statement:
-        """Run one statement with server-side binds, `tag` as the query tag and `timeout`
-        seconds as the bound. Raises `TimeoutError`, `SessionDead`, `StatementError` or
-        `UpstreamFailure`."""
+    def run(
+        self,
+        sql: str,
+        params: Sequence[object] | Mapping[str, object],
+        *,
+        timeout: float,
+        tag: str,
+        op: str,
+        schema: str | None,
+    ) -> Statement:
+        """Run one statement with server-side binds (a sequence for `numeric` placeholders, a
+        mapping for `named` ones), `tag` as the query tag, `op` as the operation that asked for it
+        and `timeout` seconds as the bound. `schema` is the `--schema` of the call, or None.
+        Raises `TimeoutError`, `SessionDead`, `StatementError` or `UpstreamFailure`."""
         ...
 
     def commit(self) -> None: ...

@@ -71,6 +71,12 @@ class LimitedSink:
         self.committed: bool | None = None
         self.dry_run: bool | None = None
         self.exit_code: int | None = None
+        #: Why the call was truncated, for the audit record (the largest cell is named).
+        self.limit_message: str | None = None
+
+    @property
+    def room(self) -> int:
+        return self._max_bytes - self.bytes
 
     @property
     def scrubbed(self) -> int:
@@ -149,6 +155,17 @@ class LimitedSink:
             self.bytes += len(part)
         self._stop("bytes", f"byte limit {self._max_bytes} reached")
 
+    def cell_too_large(self, column: str, size: int) -> NoReturn:
+        name = self._scrub.data(column)
+        message = (
+            f"column {name!r} holds at least {size} bytes, more than the {self.room} left of "
+            f"maxBytes ({self._max_bytes})"
+        )
+        self.truncated = True
+        self.reason = "bytes"
+        self.limit_message = message
+        raise LimitReached("bytes", message, column=name, size=size)
+
     def _stop(self, reason: LimitReason, message: str) -> NoReturn:
         self.truncated = True
         self.reason = reason
@@ -163,4 +180,5 @@ class LimitedSink:
         )
         self.truncated = True
         self.reason = "bytes"
+        self.limit_message = message
         raise LimitReached("bytes", message, column=name, size=sizes[index])

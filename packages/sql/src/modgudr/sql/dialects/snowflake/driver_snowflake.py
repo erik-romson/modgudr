@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import snowflake.connector
@@ -67,7 +67,7 @@ class SnowflakeStatement:
         count = self._cursor.rowcount
         return count if isinstance(count, int) and count >= 0 else None
 
-    def fetch(self, size: int) -> Sequence[Sequence[Cell]]:
+    def fetch(self, size: int, budget: int) -> Sequence[Sequence[Cell]]:
         try:
             rows = self._cursor.fetchmany(size)
         except errors.Error as exc:
@@ -109,7 +109,17 @@ class SnowflakeSession:
             cursor.close()
             raise
 
-    def run(self, sql: str, params: Sequence[object], *, timeout: float, tag: str) -> Statement:
+    def run(
+        self,
+        sql: str,
+        params: Sequence[object] | Mapping[str, object],
+        *,
+        timeout: float,
+        tag: str,
+        op: str,
+        schema: str | None,
+    ) -> Statement:
+        assert not isinstance(params, Mapping) and schema is None
         return self._execute(sql, params, timeout, tag)
 
     def commit(self) -> None:

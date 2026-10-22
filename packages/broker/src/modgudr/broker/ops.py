@@ -1360,6 +1360,8 @@ class Execution:
         )
         if outcome.stage is not None:
             record["stage"] = outcome.stage
+        if sink.limit_message is not None:
+            record["limit"] = self.scrub.error(sink.limit_message)
         if outcome.layer is not None:
             record.update(layer=outcome.layer, rule=outcome.rule)
         await self.b.audit.completion(self.call.audit_id, **record)

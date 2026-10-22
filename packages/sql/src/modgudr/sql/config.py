@@ -21,9 +21,24 @@ DIALECT_KEYS: dict[str, DialectKeys] = {
         required=frozenset({"account", "user", "role", "warehouse"}),
         optional=frozenset({"database", "schema"}),
     ),
+    "oracle": DialectKeys(
+        required=frozenset({"host", "user"}),
+        optional=frozenset({"port", "service", "sid"}),
+    ),
 }
 
-_KEYS = ("account", "user", "role", "warehouse", "database", "schema")
+_KEYS = (
+    "account",
+    "user",
+    "role",
+    "warehouse",
+    "database",
+    "schema",
+    "host",
+    "port",
+    "service",
+    "sid",
+)
 
 
 class SqlConfig(BaseModel):
@@ -39,6 +54,10 @@ class SqlConfig(BaseModel):
     warehouse: str | None = None
     database: str | None = None
     schema_: str | None = Field(default=None, alias="schema")
+    host: str | None = None
+    port: int | None = Field(default=None, ge=1, le=65535)
+    service: str | None = None
+    sid: str | None = None
 
     @field_validator("account")
     @classmethod
@@ -47,6 +66,24 @@ class SqlConfig(BaseModel):
             from .dialects.snowflake.connect import snowflake_host
 
             snowflake_host(value)
+        return value
+
+    @field_validator("host")
+    @classmethod
+    def _host(cls, value: str | None) -> str | None:
+        if value is not None:
+            from .dialects.oracle.connect import check_host
+
+            check_host(value)
+        return value
+
+    @field_validator("service", "sid")
+    @classmethod
+    def _service_or_sid(cls, value: str | None) -> str | None:
+        if value is not None:
+            from .dialects.oracle.connect import check_service
+
+            check_service(value)
         return value
 
     @model_validator(mode="after")
@@ -62,6 +99,8 @@ class SqlConfig(BaseModel):
         extra = sorted(given - keys.required - keys.optional)
         if extra:
             raise ValueError(f"dialect {self.dialect} takes no {', '.join(extra)}")
+        if self.dialect == "oracle" and (self.service is None) == (self.sid is None):
+            raise ValueError("dialect oracle needs exactly one of service and sid")
         return self
 
     def value(self, key: str) -> str | None:

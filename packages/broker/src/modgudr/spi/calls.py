@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import Literal, NoReturn, Protocol
 
 from .rules import Constraint
 
@@ -107,6 +107,17 @@ class ResultSink(Protocol):
     async def header(self, columns: Sequence[Column]) -> None: ...
 
     async def row(self, values: Sequence[Cell]) -> None: ...
+
+    @property
+    def room(self) -> int:
+        """The bytes of `maxBytes` still free, for a plugin that must not read a cell it could
+        not send (an Oracle LOB, M16)."""
+        ...
+
+    def cell_too_large(self, column: str, size: int) -> NoReturn:
+        """End the call with `limit` because one cell, `size` encoded bytes at least, does not
+        fit in `room`. Raises `LimitReached`."""
+        ...
 
     async def text(self, stream: str, data: str) -> None:
         """A chunk of text output (`stream` is `stdout` or `stderr`), for kubectl."""

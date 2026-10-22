@@ -7,6 +7,7 @@ import pytest
 from modgudr.spi import BadArguments, Call, Risk
 from modgudr.sql.config import SqlConfig
 from modgudr.sql.connector import ACTIONS, CHECKS, SqlConnector
+from modgudr.sql.dialects.oracle import OracleDialect
 from modgudr.sql.dialects.snowflake import SnowflakeDialect
 from modgudr.sql.ops import apply_contract, bind_call, parse_identifier, statement_text, validate
 
@@ -167,6 +168,7 @@ def test_connector_surface() -> None:
         "describe",
         "count",
         "sample",
+        "plan",
     ]
     assert [r.pattern for r in connector.default_rules().allow] == ["read"]
     assert set(CHECKS) == {"requireWhere", "maxAffectedRows"}
@@ -174,3 +176,62 @@ def test_connector_surface() -> None:
     assert constrained["update"] == {"requireWhere", "maxAffectedRows"}
     assert constrained["delete"] == {"requireWhere", "maxAffectedRows"}
     assert constrained["insert"] == {"maxAffectedRows"}
+
+
+# --- Oracle: plan and --schema (M14, Q3) ---------------------------------------------------------
+
+ORACLE = OracleDialect()
+
+
+@pytest.mark.parametrize("schema", ["APP", "app", "A1", "a$b#c_d", "A" * 128])
+def test_valid_schema_names(schema: str) -> None:
+    validate(call("query", sql="select 1 from dual", schema=schema), ORACLE, max_rows=10)
+
+
+@pytest.mark.parametrize(
+    "schema", ["", "1A", "_A", "A B", "A;B", 'A"B', "A.B", "A-B", "A" * 129, "A\n"]
+)
+def test_bad_schema_names_are_refused(schema: str) -> None:
+    with pytest.raises(BadArguments, match="not a schema name"):
+        validate(call("query", sql="select 1 from dual", schema=schema), ORACLE, max_rows=10)
+
+
+@pytest.mark.parametrize("op", ["query", "tables", "describe", "count", "sample", "plan"])
+def test_schema_and_plan_are_oracle_only(op: str) -> None:
+    args: dict[str, object] = {"sql": "select 1", "table": "po"}
+    spec = next(o for o in SqlConnector().operations() if o.name == op)
+    assert "schema" in {a.name for a in spec.args}
+    with pytest.raises(BadArguments, match="Oracle targets only"):
+        validate(call(op, schema="APP", **args), DIALECT, max_rows=10)
+
+
+def test_plan_is_oracle_only() -> None:
+    with pytest.raises(BadArguments, match="plan op is available on Oracle targets only"):
+        validate(call("plan", sql="select 1 from dual"), DIALECT, max_rows=10)
+    validate(call("plan", sql="select 1 from dual"), ORACLE, max_rows=10)
+
+
+def test_write_takes_no_schema() -> None:
+    write = next(o for o in SqlConnector().operations() if o.name == "write")
+    assert "schema" not in {a.name for a in write.args}
+
+
+def test_plan_explains_selects_only() -> None:
+    connector = SqlConnector()
+    config = SqlConfig.model_validate(ORACLE_CONFIG)
+    select = connector.classify(call("plan", sql="select * from po where id = :id"), config)
+    assert select.invariant_hits == () and select.risk is Risk.READ
+    for sql in ("delete from po", "update po set a = 1", "select * from po for update"):
+        action = connector.classify(call("plan", sql=sql), config)
+        assert action.invariant_hits == ("op-contract",), sql
+    refused = connector.classify(call("plan", sql="delete from po"), config)
+    assert "plan op explains SELECT statements" in refused.detail
+
+
+def test_describe_accepts_oracle_s_select_template() -> None:
+    config = SqlConfig.model_validate(ORACLE_CONFIG)
+    action = SqlConnector().classify(call("describe", table="app.po"), config)
+    assert action.invariant_hits == ()
+
+
+ORACLE_CONFIG = {"dialect": "oracle", "host": "db.example.net", "user": "U", "service": "S"}
