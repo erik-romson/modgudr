@@ -17,21 +17,22 @@ from modgudr.broker.registry import (
     connector_policy,
 )
 from modgudr.spi import ActionSpec, Risk
+from modgudr.store_bws import BwsStore
 from modgudr.store_file import FileStore
 from tests.support.brokerfx import COMPANY, TARGETS, write_file
 from tests.support.echo_connector import EchoConnector
 
 
-def test_discovery_finds_the_file_store_with_its_distribution() -> None:
+def test_discovery_finds_the_stores_with_their_distributions() -> None:
     registry = PluginRegistry.discover()
     assert registry.store_factory("file") is FileStore
-    (origin,) = [o for o in registry.origins() if o.group == SECRET_STORES]
-    assert (origin.name, origin.distribution, origin.version) == (
-        "file",
-        "modgudr-store-file",
-        "0.1.0",
-    )
-    assert origin.record_sha256 is not None and len(origin.record_sha256) == 64
+    assert registry.store_factory("bws") is BwsStore
+    origins = [o for o in registry.origins() if o.group == SECRET_STORES]
+    assert [(o.name, o.distribution, o.version) for o in origins] == [
+        ("bws", "modgudr-store-bws", "0.1.0"),
+        ("file", "modgudr-store-file", "0.1.0"),
+    ]
+    assert all(o.record_sha256 is not None and len(o.record_sha256) == 64 for o in origins)
 
 
 def test_programmatic_registration_and_duplicates() -> None:

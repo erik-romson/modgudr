@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -107,6 +107,8 @@ class StoreContext:
     settings: Mapping[str, object] = field(default_factory=dict[str, object])
     #: `modgudr-broker --secrets-file` (the `file` store).
     secrets_file: Path | None = None
+    #: The broker's `PATH`, where a store looks for the executable it drives (`bws`).
+    path: str = ""
 
 
 class Secrets(Protocol):
@@ -212,6 +214,19 @@ class SecretStore(Protocol):
     async def lock(self) -> None: ...
 
     def is_unlocked(self) -> bool: ...
+
+
+@runtime_checkable
+class ReportingStore(Protocol):
+    """A store that reports facts for `status` and warnings for the broker's start-up."""
+
+    def facts(self) -> Mapping[str, object]:
+        """JSON-able facts for `status` (for `bws`: whether the CLI was found)."""
+        ...
+
+    def warnings(self) -> Sequence[str]:
+        """Lines the broker prints to stderr at start."""
+        ...
 
 
 #: What a `modgudr.secret_stores` entry point names: a class or function taking the context.

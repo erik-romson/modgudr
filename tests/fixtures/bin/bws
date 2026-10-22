@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""A fake `bws` for the tests (step 14). It never reads FAKE_* variables.
+
+The scenario comes from `fake-scenario.json` beside this file, under the key "bws":
+  token        the access token that is accepted (BWS_ACCESS_TOKEN must equal it)
+  secrets      a list of {id, projectId, value, note}, copied from tests/fixtures/bws/secrets.json
+  projects     a list of {id, name} for `project list`; default: the projects of the secrets
+  revoke       true: every later call fails like a revoked token (written mid-session)
+  force_state  true: state is created under both paths regardless of the config's opt-out
+  get_format   "object" (default), "array" (one element) or "array2" (two elements)
+Like the real CLI, it reads the config named by BWS_CONFIG_FILE and creates
+`<state_dir, else $HOME/.config/bws/state>/<token id>` unless the config opts state out.
+Each run appends one JSON line (argv, cwd, the full environment) to `fake-log.jsonl`.
+"""
+
+import json
+import os
+import sys
+import tomllib
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+
+def log(entry):
+    with open(HERE / "fake-log.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def scenario():
+    try:
+        document = json.loads((HERE / "fake-scenario.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    value = document.get("bws", {}) if isinstance(document, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def fail(message, code=1):
+    print("Error: " + message, file=sys.stderr)
+    return code
+
+
+def profile():
+    path = os.environ.get("BWS_CONFIG_FILE")
+    if not path:
+        return {}
+    try:
+        with open(path, "rb") as handle:
+            document = tomllib.load(handle)
+    except OSError:
+        return {}
+    return document.get("profiles", {}).get("default", {})
+
+
+def state_paths(config, force):
+    """The directories a state file goes in: both with `force`, else by the config."""
+    home_state = Path(os.environ.get("HOME", "/nonexistent")) / ".config" / "bws" / "state"
+    configured = Path(config["state_dir"]) if "state_dir" in config else home_state
+    if force:
+        return [configured, home_state] if configured != home_state else [configured]
+    if config.get("state_opt_out") is True:
+        return []
+    return [configured]
+
+
+def write_state(config, token, force):
+    parts = token.split(".")
+    token_id = parts[1] if len(parts) >= 3 else "token"
+    for directory in state_paths(config, force):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / token_id).write_text("cached state", "utf-8")
+
+
+def main():
+    argv = sys.argv[1:]
+    log({"tool": "bws", "argv": argv, "cwd": os.getcwd(), "env": dict(os.environ)})
+    plan = scenario()
+    token = os.environ.get("BWS_ACCESS_TOKEN")
+    if not token:
+        return fail("Missing access token. Use --access-token or set BWS_ACCESS_TOKEN")
+    if plan.get("revoke") or token != plan.get("token"):
+        return fail("Invalid access token: the token is unknown or has been revoked")
+    write_state(profile(), token, bool(plan.get("force_state")))
+    secrets = plan.get("secrets", [])
+    if argv == ["project", "list", "--output", "json"]:
+        projects = plan.get("projects")
+        if projects is None:
+            ids = sorted({s["projectId"] for s in secrets})
+            projects = [{"id": i, "name": "project-" + i[:4]} for i in ids]
+        print(json.dumps(projects))
+        return 0
+    if len(argv) == 5 and argv[:2] == ["secret", "get"] and argv[3:] == ["--output", "json"]:
+        found = [s for s in secrets if s["id"] == argv[2]]
+        if not found:
+            return fail("Received error message from server: [404 Not Found] Resource not found.")
+        secret = dict(found[0], key="SECRET_KEY", creationDate="2026-10-01T00:00:00Z")
+        fmt = plan.get("get_format", "object")
+        if fmt == "array":
+            secret = [secret]
+        elif fmt == "array2":
+            secret = [secret, secret]
+        print(json.dumps(secret))
+        return 0
+    return fail("unsupported arguments: " + " ".join(argv), 2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

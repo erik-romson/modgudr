@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = ["modgudr-broker"]
 
+[project.entry-points."modgudr.secret_stores"]
+bws = "modgudr.store_bws:BwsStore"
+
 [tool.uv.sources]
 modgudr-broker = { workspace = true }
 

@@ -418,6 +418,9 @@ def cmd_status(argv: Sequence[str]) -> int:
         f"agent socket: {data['agentSocket']}",
         f"human socket: {data['humanSocket']}",
     ]
+    store_problem = data.get("storeInfo", {}).get("problem")
+    if store_problem:
+        lines.append(f"store: {store_problem}")
     policy = data["policy"]
     lines.append(f"policy: {len(policy['files'])} files in {policy['dir']}")
     if policy.get("message"):

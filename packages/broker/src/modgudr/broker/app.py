@@ -46,6 +46,7 @@ from ..spi import (
     Decision,
     Destination,
     OperationSpec,
+    ReportingStore,
     SecretRef,
     SecretStore,
     StoreConfigError,
@@ -70,7 +71,7 @@ from .ops import (
     Refused,
     Request,
 )
-from .policy.load import Policy, PolicyError, load_policy
+from .policy.load import Fstat, Policy, PolicyError, load_policy
 from .policy.model import TargetConfig
 from .registry import PluginError, PluginRegistry
 from .scrub import MIN_DATA_LENGTH, Scrubber
@@ -142,6 +143,11 @@ class BrokerConfig:
     scrubber: Scrubber | None = None
     #: The hardening facts of the daemon (M23); None for a factory-built broker.
     hardening: Hardening | None = None
+    #: The broker's `PATH`, where a store looks for its executable (`bws`, M19).
+    path: str = ""
+    #: How policy files are stat'ed after opening: tests inject a root-owned company file, because
+    #: `--dev` is refused with the `bws` store (step 03's owner-check seam).
+    policy_fstat: Fstat | None = None
 
     @property
     def human_socket(self) -> Path:
@@ -178,6 +184,7 @@ class BrokerConfig:
             secrets_file=secrets_file,
             dev=dev,
             user_home=user_home,
+            path=environ.get("PATH", ""),
         )
 
 
@@ -231,7 +238,12 @@ def build(config: BrokerConfig) -> Broker:
     except PluginError as exc:
         raise StartError(str(exc)) from exc
     try:
-        policy = load_policy(config.policy_dir, registry, dev=config.dev)
+        if config.policy_fstat is not None:
+            policy = load_policy(
+                config.policy_dir, registry, dev=config.dev, fstat=config.policy_fstat
+            )
+        else:
+            policy = load_policy(config.policy_dir, registry, dev=config.dev)
     except PolicyError as exc:
         raise StartError(f"the policy cannot be loaded:\n{exc}") from exc
     scheme = policy.company.store.default
@@ -442,6 +454,7 @@ class Broker:
             dev=self.config.dev,
             settings=dict(settings),
             secrets_file=self.config.secrets_file,
+            path=self.config.path,
         )
         try:
             store = self._store_factory(context)
@@ -449,6 +462,9 @@ class Broker:
             raise StartError(f"the {self.store_scheme} store cannot start: {exc}") from exc
         if store.is_unlocked():
             raise StartError(f"the {self.store_scheme} store must start locked (M7)")
+        if isinstance(store, ReportingStore):
+            for warning in store.warnings():
+                self._warn(warning)
         return store
 
     async def _open_targets(self) -> None:
@@ -782,6 +798,9 @@ class Broker:
             "locked": not unlocked,
             "dev": self.config.dev,
             "store": self.store_scheme,
+            "storeInfo": (
+                dict(self.store.facts()) if isinstance(self.store, ReportingStore) else {}
+            ),
             "hardening": (
                 self.config.hardening.to_json()
                 if self.config.hardening is not None
