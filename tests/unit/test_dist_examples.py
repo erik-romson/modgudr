@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -80,3 +81,21 @@ def test_example_policy_says_where_it_is_installed_and_who_owns_it() -> None:
     assert "owned by root" in company
     assert "policy.d/50-targets.yaml" in targets
     assert "owned by you" in targets
+
+
+def test_install_script_installs_both_the_broker_and_the_client_command() -> None:
+    """uv links only the named tool's executables, so `modgudr` needs its own install line (B1)."""
+    done = subprocess.run(
+        ["/bin/sh", str(ROOT / "dist" / "install-l0.sh"), "--dry-run", "--prefix", "/nonexistent"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    installs = [line for line in done.stdout.splitlines() if line.startswith("+ uv tool install")]
+    assert len(installs) == 2
+    assert f"--from {ROOT}/packages/broker modgudr-broker" in installs[0]
+    assert installs[1] == f"+ uv tool install --from {ROOT}/packages/client modgudr-client"
+    alias = [i for i, line in enumerate(done.stdout.splitlines()) if "ln -s modgudr" in line]
+    lines = done.stdout.splitlines()
+    assert all(i > lines.index(installs[1]) for i in alias)

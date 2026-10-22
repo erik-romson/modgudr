@@ -80,7 +80,12 @@ run uv tool install --from "$REPO/packages/broker" modgudr-broker \
     --with "modgudr-kubectl @ file://$REPO/packages/kubectl" \
     --with "modgudr-store-bws @ file://$REPO/packages/store-bws"
 
-# The short alias, only when nothing else is called that.
+# uv links only the executables of the named tool, so `modgudr` needs its own tool install. The
+# client is stdlib-only, so a separate tool environment costs nothing.
+run uv tool install --from "$REPO/packages/client" modgudr-client
+
+# The short alias, only when nothing else is called that. It comes after the client install, so
+# that it never dangles.
 if command -v mg > /dev/null 2>&1; then
     echo "# the short alias name is already taken on this machine; no alias is created"
 else
