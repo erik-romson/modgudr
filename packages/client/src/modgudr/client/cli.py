@@ -17,6 +17,7 @@ Messages of `modgudr` itself go to stderr. Exit codes are M5's.
 """
 
 import argparse
+import importlib.resources
 import json
 import os
 import sys
@@ -27,6 +28,8 @@ from pathlib import Path
 from typing import Any, BinaryIO, NoReturn
 
 from modgudr.client import paths
+from modgudr.client.agent.doctor import run_agent_doctor, run_doctor
+from modgudr.client.agent.run import run_claude
 from modgudr.client.agent.setup import (
     DROPIN_DIR,
     DROPIN_FILE,
@@ -86,6 +89,10 @@ commands:
   unlock | lock                     the store session (your own terminal only)
   audit tail [options]              recent audit records (your own terminal only)
   agent-setup claude [--out DIR]    generate the Claude Code managed settings and hook
+  agent run claude [--env E] [--pass-env NAME]... [-- ARGS]
+                                    start Claude Code with a clean environment
+  doctor [--agent claude]           check the set-up; --agent also probes the sandbox (API tokens)
+  agent-docs claude                 print the Claude Code skill
 
 The environment of a call is system@env, else $MODGUDR_ENV, else the policy's default.
 Exit codes: 0 ok, 2 denied, 3 locked, 4 truncated or timed out, 5 upstream error,
@@ -547,6 +554,61 @@ def cmd_agent_setup(argv: Sequence[str]) -> int:
     return EXIT_OK
 
 
+def cmd_agent(argv: Sequence[str]) -> int:
+    rest = list(argv)
+    passthrough: list[str] = []
+    if "--" in rest:
+        split = rest.index("--")
+        rest, passthrough = rest[:split], rest[split + 1 :]
+    parser = _parser("agent", "Run a coding agent with a clean environment.")
+    sub = parser.add_subparsers(dest="action", required=True, metavar="run")
+    run = sub.add_parser("run", help="start an agent session")
+    which = run.add_subparsers(dest="agent", required=True, metavar="claude")
+    claude = which.add_parser(
+        "claude",
+        help="Claude Code; arguments after -- go to claude",
+        description="Start Claude Code with the allowlisted environment of M21 and a session id.",
+    )
+    claude.add_argument("--env", help="the environment of this session (MODGUDR_ENV)")
+    claude.add_argument(
+        "--pass-env",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="also pass this variable to claude (repeatable)",
+    )
+    ns = parser.parse_args(rest)
+    return run_claude(env=ns.env, pass_env=ns.pass_env, claude_args=passthrough)
+
+
+def cmd_doctor(argv: Sequence[str]) -> int:
+    parser = _parser(
+        "doctor",
+        "Check the set-up and the agent isolation. Exit 1 when something deviates.",
+    )
+    parser.add_argument(
+        "--agent",
+        choices=["claude"],
+        help="also run the isolation probe inside Claude Code (spends API tokens)",
+    )
+    ns = parser.parse_args(list(argv))
+    if ns.agent == "claude":
+        return run_agent_doctor()
+    return run_doctor()
+
+
+def skill_text() -> str:
+    return importlib.resources.files("modgudr.client").joinpath("docs/SKILL.md").read_text("utf-8")
+
+
+def cmd_agent_docs(argv: Sequence[str]) -> int:
+    parser = _parser("agent-docs", "Print the skill text for a coding agent.")
+    parser.add_argument("agent", choices=["claude"])
+    parser.parse_args(list(argv))
+    sys.stdout.write(skill_text())
+    return EXIT_OK
+
+
 def _later(name: str) -> Callable[[Sequence[str]], int]:
     def stub(argv: Sequence[str]) -> int:
         _note(f"{name}: {LATER}")
@@ -566,9 +628,9 @@ COMMANDS: Mapping[str, Callable[[Sequence[str]], int]] = {
     "audit": cmd_audit,
     "login": _later("login"),
     "agent-setup": cmd_agent_setup,
-    "agent": _later("agent"),
-    "doctor": _later("doctor"),
-    "agent-docs": _later("agent-docs"),
+    "agent": cmd_agent,
+    "doctor": cmd_doctor,
+    "agent-docs": cmd_agent_docs,
 }
 
 

@@ -784,6 +784,10 @@ class Broker:
             "managedSettings": list(self._isolation.files),
             "auditDegraded": self.audit.degraded,
             "defaultEnv": {"env": self.policy.default_env, "source": "defaults.env"},
+            "environments": [
+                {"name": name, "aliases": list(env.aliases)}
+                for name, env in self.policy.company.environments.items()
+            ],
             "policy": self.policy_status(),
         }
         warning = self.l0_warning()

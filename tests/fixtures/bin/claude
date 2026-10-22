@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""A fake `claude` for the tests (step 12). It never reads FAKE_* variables.
+
+The mode comes from `fake-scenario.json` beside this file, under the key "claude":
+  run-probe      runs `probe.py` from the work directory, unsandboxed, with this interpreter
+  all-blocked    writes a probe-result.json with every check BLOCKED except agent.sock
+  no-probe       writes no result
+  not-logged-in  exits like the real CLI when it is not logged in
+Each run appends one JSON line (argv, cwd, the full environment) to `fake-log.jsonl`.
+"""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+FLAGS_WITH_VALUE = {
+    "-p",
+    "--output-format",
+    "--tools",
+    "--max-turns",
+    "--permission-mode",
+    "--allowedTools",
+}
+FLAGS_WITHOUT_VALUE = {"--verbose", "--no-session-persistence"}
+
+
+def parse(argv):
+    parsed = {}
+    i = 0
+    while i < len(argv):
+        flag = argv[i]
+        if flag in FLAGS_WITH_VALUE and i + 1 < len(argv):
+            parsed[flag] = argv[i + 1]
+            i += 2
+        elif flag in FLAGS_WITHOUT_VALUE:
+            parsed[flag] = True
+            i += 1
+        else:
+            print("claude: unexpected argument " + flag, file=sys.stderr)
+            sys.exit(2)
+    return parsed
+
+
+def log(entry):
+    with open(HERE / "fake-log.jsonl", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry) + "\n")
+
+
+def emit(event):
+    print(json.dumps(event), flush=True)
+
+
+def scenario():
+    try:
+        document = json.loads((HERE / "fake-scenario.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    value = document.get("claude", {}) if isinstance(document, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def main():
+    argv = sys.argv[1:]
+    entry = {"tool": "claude", "argv": argv, "cwd": os.getcwd(), "env": dict(os.environ)}
+    input_path = Path("probe-input.json")
+    if input_path.exists():
+        entry["probe_input"] = json.loads(input_path.read_text("utf-8"))
+    log(entry)
+    parse(argv)
+    mode = scenario().get("mode")
+    if mode == "not-logged-in":
+        print("Not logged in · Please run /login")
+        return 1
+    emit({"type": "system", "subtype": "init", "tools": ["Bash"], "cwd": os.getcwd()})
+    if mode == "run-probe":
+        subprocess.run([sys.executable, "probe.py"], cwd=os.getcwd(), check=False)
+    elif mode == "all-blocked":
+        sys.path.insert(0, os.getcwd())
+        import probe
+
+        spec = json.loads(input_path.read_text("utf-8"))
+        checks = []
+        for check in probe.planned(spec):
+            if check["untested"]:
+                result = "NOT_TESTED"
+            elif check["id"] == "agent.sock":
+                result = "REACHABLE"
+            else:
+                result = "BLOCKED"
+            checks.append({"id": check["id"], "label": check["label"], "result": result, "detail": ""})
+        Path("probe-result.json").write_text(json.dumps({"checks": checks}), "utf-8")
+    elif mode == "no-probe":
+        pass
+    else:
+        print("claude fake: no mode in fake-scenario.json", file=sys.stderr)
+        return 64
+    emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

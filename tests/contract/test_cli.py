@@ -380,7 +380,7 @@ def test_help_exits_0_and_option_errors_exit_64(served: BrokerThread) -> None:
     assert cli(env, "targets", "--sys", "x").returncode == 64  # no abbreviations
 
 
-@pytest.mark.parametrize("command", ["agent", "doctor", "agent-docs", "login"])
+@pytest.mark.parametrize("command", ["login"])
 def test_later_commands_are_stubs(served: BrokerThread, command: str) -> None:
     done = cli(served.env, command)
     assert done.returncode == 64 and "added in a later step" in done.stderr

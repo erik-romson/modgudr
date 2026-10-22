@@ -75,6 +75,14 @@ class UsageError(Error):
     exit_code = 64
 
 
+class CannotRun(Error):
+    """`agent run` or `doctor --agent` cannot run or reach a verdict (`claude` missing, not
+    logged in, inconclusive). Exit 69 (M5)."""
+
+    code = "cannot_run"
+    exit_code = 69
+
+
 ERROR_CLASSES: Mapping[str, type[Error]] = {
     "denied": Denied,
     "locked": Locked,

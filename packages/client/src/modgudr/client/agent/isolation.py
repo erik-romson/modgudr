@@ -560,6 +560,39 @@ def _socket_entries(value: object, user_home: str) -> list[tuple[str, str]]:
     return out
 
 
+def covering_socket_entries(
+    settings: Mapping[str, object], human_socket: str, *, user_home: str
+) -> list[str]:
+    """The `allowUnixSockets` entries (as written) that equal or contain `human.sock`."""
+    human = os.path.normpath(human_socket)
+    value = _get(settings, "sandbox.network.allowUnixSockets")
+    out: list[str] = []
+    for written, expanded in _socket_entries(value, user_home):
+        real = os.path.realpath(expanded)
+        if _covers(expanded, human) or _covers(real, human):
+            out.append(written)
+    return out
+
+
+def absolute_path(written: str, user_home: str) -> str | None:
+    """A settings path (`~/x`, `//x`, `/x`) as an absolute path, or None for a relative one."""
+    return _expand(written, user_home)
+
+
+def credential_denials(
+    settings: Mapping[str, object], path: str, is_dir: bool, *, user_home: str
+) -> tuple[bool, bool]:
+    """Whether the settings deny a credential path (written form) in `sandbox.credentials.files`
+    and with a `Read(...)` rule, the two layers `check_settings` requires."""
+    expanded = _expand(path, user_home)
+    in_sandbox = expanded is not None and any(
+        _covers(entry, expanded) for entry in _denied_files(settings, user_home)
+    )
+    rule_path = path.rstrip("/") + "/**" if is_dir else path
+    in_rules = _rule_covers(_parse_rules(settings, user_home), "Read", rule_path, user_home)
+    return in_sandbox, in_rules
+
+
 def check_settings(settings: Mapping[str, object], facts: Facts, *, user_home: str) -> list[str]:
     """The failed M22 requirements of merged settings, each naming its key. Empty means isolated."""
     reasons: list[str] = []
@@ -630,19 +663,16 @@ def check_settings(settings: Mapping[str, object], facts: Facts, *, user_home: s
     if darwin:
         value = _get(settings, "sandbox.network.allowUnixSockets")
         found = _found(value)
-        entries = _socket_entries(value, user_home)
         listed = cast("list[object]", value) if isinstance(value, list) else None
         if listed != [facts.agent_socket]:
             reasons.append(
                 f"sandbox.network.allowUnixSockets must list exactly {facts.agent_socket} "
                 f"(found {found})"
             )
-        for written, expanded in entries:
-            real = os.path.realpath(expanded)
-            if _covers(expanded, human) or _covers(real, human):
-                reasons.append(
-                    f"sandbox.network.allowUnixSockets entry {written} covers human.sock ({human})"
-                )
+        for written in covering_socket_entries(settings, facts.human_socket, user_home=user_home):
+            reasons.append(
+                f"sandbox.network.allowUnixSockets entry {written} covers human.sock ({human})"
+            )
         must_not_be_true("sandbox.network.allowAllUnixSockets")
     if not any(_covers(entry, human) for entry in denied):
         detail = "; on Linux that is its only protection" if not darwin else ""

@@ -2,6 +2,7 @@ import os
 
 import pytest
 
+from tests.support.fakebin import fakebin as fakebin
 from tests.support.shortdir import shortdir as shortdir
 
 _OPT_IN = {
