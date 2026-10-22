@@ -71,7 +71,11 @@ environments:
 
 def targets(tier: str = "borrowed", *, extra: str = "") -> str:
     """`aks-test` (system `aks`, env test, the given tier), `aks-prod` and `aks-fast` (timeout
-    1 s), all on the same cluster."""
+    3 s), all on the same cluster.
+
+    The first call through the fakes starts two `az` processes before `kubectl`: about 0.5 s on an
+    idle machine and well over 1 s on a loaded one. `aks-fast` must still reach `kubectl` in
+    time."""
     cluster = (
         f"    cluster: {{ subscription: {SUBSCRIPTION}, resourceGroup: rg-aks-test, "
         "name: aks-test }\n"
@@ -93,7 +97,7 @@ def targets(tier: str = "borrowed", *, extra: str = "") -> str:
         "  aks-fast:\n"
         "    type: kubectl\n"
         "    env: test\n"
-        "    timeout: 1s\n"
+        "    timeout: 3s\n"
         "    provider: azure-cli\n"
         "    credential: { tier: borrowed }\n"
         + cluster

@@ -261,7 +261,7 @@ async def test_logs_follow_streams_until_the_timeout(
     frames = await kubectl(env, "aks-fast", "logs", "-f", "pod/x")
     err = error(frames)
     assert err["code"] == "timeout"
-    # The scrubber holds back a short tail, so only the head is certain to arrive in 1 s.
+    # The scrubber holds back a short tail, so only the head is certain to arrive in time.
     assert text_of(frames).startswith("log line a\n")
     (run,) = fakebin.entries("kubectl")
     await wait_for(lambda: pid_gone(run["pid"]))
