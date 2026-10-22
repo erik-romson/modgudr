@@ -510,9 +510,22 @@ def test_audit_tail_bad_n_is_exit_64(served: BrokerThread) -> None:
 # --- interruption ------------------------------------------------------------------------------
 
 
+# A background launch ignores SIGINT, and an ignored SIGINT survives exec, so the CLI would never
+# see Ctrl-C. Reset it to the default before exec, as an interactive terminal leaves it.
+RESET_SIGINT = (
+    "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); "
+    "os.execv(sys.argv[1], sys.argv[1:])"
+)
+
+
 def start_stream(env: BrokerEnv) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
-        cli_command("echo-test", "slow", "--rows", "100", "--delay-ms", "100"),
+        [
+            sys.executable,
+            "-c",
+            RESET_SIGINT,
+            *cli_command("echo-test", "slow", "--rows", "100", "--delay-ms", "100"),
+        ],
         env=cli_environ(env),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
