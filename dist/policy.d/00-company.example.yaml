@@ -1,0 +1,64 @@
+# Example company policy. Hosts, accounts and users here are example data only.
+#
+# Install as ~/.modgudr/policy.d/00-company.yaml (the file name loses ".example"). At L0 this file
+# is owned by root and installed with sudo, so that nothing running as you, including a coding
+# agent, can widen it:
+#
+#   sudo install -o root -m 0644 dist/policy.d/00-company.example.yaml \
+#       ~/.modgudr/policy.d/00-company.yaml
+#
+# The broker refuses a company file that is not owned by root (or, with `modgudr-broker --dev`, by
+# the current user), and one that is group- or world-writable. Edit it, install it again and
+# restart the broker: there is no reload.
+
+store:
+  default: bws
+  bws:
+    # The uuid of the Bitwarden Secrets Manager project whose secrets this store serves.
+    project: 3d2f0c1e-6b1a-4f7e-9a53-0b7d2e8c4a11
+
+defaults:
+  env: test             # the environment a call gets when it names none
+  timeout: 30s
+  maxRows: 500          # per call
+  maxRowsHard: 50000    # what a caller may ask for with --max-rows
+  maxBytes: 2MiB
+  maxRequestBytes: 1MiB
+  maxConcurrent: 4      # per target
+  idleLock: 1h
+  absoluteLock: 10h
+
+# Global; nothing below can override it.
+guard:
+  forbid: [sql:grant, sql:revoke]
+
+environments:
+  prod:
+    ceiling: read
+    kubectl:
+      constraints:
+        "*": { namespaces: [app] }
+  stage:
+    aliases: [vfy]
+    ceiling: write
+    sql:
+      allow: [write]
+      constraints:
+        update: { requireWhere: true, maxAffectedRows: 100 }
+    kubectl:
+      allow: [read, rollout/restart]
+  test:
+    aliases: [sol]
+    ceiling: destructive
+    sql:
+      allow: [write, delete]
+      deny: [truncate, ddl.drop]
+      constraints:
+        update: { requireWhere: true, maxAffectedRows: 1000 }
+        delete: { requireWhere: true, maxAffectedRows: 1000 }
+    kubectl:
+      allow: [read, rollout/restart, scale/*, delete/pods, delete/jobs]
+      deny: [delete/namespaces, delete/persistentvolumeclaims]
+      constraints:
+        "*": { namespaces: [app-test, app-test-2] }
+        "delete/*": { requireName: true }

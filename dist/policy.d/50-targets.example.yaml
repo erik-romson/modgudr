@@ -1,0 +1,66 @@
+# Example targets. Hosts, accounts and users here are example data only.
+#
+# Install as ~/.modgudr/policy.d/50-targets.yaml (further files are named 5x-*.yaml). This file is
+# owned by you (or root) and holds only non-secret connection details: the secret itself comes
+# from the store, and the store item's note pins the hosts it may be sent to:
+#
+#   modgudr-hosts: db-prod.example.net:1521
+#   modgudr-env: prod
+#
+# A target's `env` is an environment of the company file, by name or alias.
+
+targets:
+  # Oracle by service name.
+  ora-prod-ro:
+    system: ora
+    env: prod
+    type: sql
+    dialect: oracle
+    host: db-prod.example.net
+    port: 1521
+    service: PRODSVC
+    user: APP_RO
+    secret: bws:2f1c8a3e-5d47-4b0e-8f21-7c9a64d0e5b3
+    credential: { tier: dedicated }
+    maxRows: 200
+
+  # Oracle by SID.
+  ora-test:
+    system: ora
+    env: test
+    type: sql
+    dialect: oracle
+    host: db-test.example.net
+    sid: ORATEST
+    user: APP_RO
+    secret: bws:6a90d1b2-31c8-4e5f-a7d3-90b1c2e4f568
+    credential: { tier: dedicated }
+
+  # Snowflake. The connection is key-pair authenticated; the private key is the secret.
+  sf-prod:
+    system: sf
+    env: prod
+    type: sql
+    dialect: snowflake
+    account: acme-example
+    user: APP_RO
+    role: APP_READ
+    warehouse: APP_WH
+    database: APP
+    schema: PUBLIC
+    secret: bws:b1e7c4d9-0a2f-4863-9d15-e8f3a7b60c24
+    credential: { tier: dedicated }
+
+  # kubectl on an AKS cluster. There is no stored secret: the endpoint and a short-lived token come
+  # from the developer's own Azure login (provider azure-cli, tier borrowed).
+  aks-test:
+    system: aks
+    env: test
+    type: kubectl
+    cluster:
+      subscription: 11111111-2222-4333-8444-555555555555
+      resourceGroup: rg-aks-test
+      name: aks-test
+    defaultNamespace: app-test
+    provider: azure-cli
+    credential: { tier: borrowed }

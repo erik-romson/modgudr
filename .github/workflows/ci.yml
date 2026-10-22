@@ -1,0 +1,86 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Every test command goes through scripts/check.sh (ruff, ruff format, pyright, then pytest).
+# CI never downloads `bws` and never uses the Bitwarden SDK: the tests use the fake in
+# tests/fixtures/bin/bws.
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync the workspace
+        run: uv sync --locked
+      - name: Install bats and its libraries
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install bats-core
+          else
+            sudo apt-get update
+            sudo apt-get install -y bats
+          fi
+          sudo mkdir -p /usr/local/lib/bats
+          sudo git clone --depth 1 --branch v0.3.0 https://github.com/bats-core/bats-support /usr/local/lib/bats/bats-support
+          sudo git clone --depth 1 --branch v2.1.0 https://github.com/bats-core/bats-assert /usr/local/lib/bats/bats-assert
+          sudo git clone --depth 1 --branch v0.4.0 https://github.com/bats-core/bats-file /usr/local/lib/bats/bats-file
+      - name: Checks and tests
+        run: sh scripts/check.sh tests -m "not oracle"
+      - name: BATS
+        run: bats bats/
+
+  oracle:
+    name: oracle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync the workspace
+        run: uv sync --locked
+      - name: Pull the Oracle Free image
+        run: docker pull gvenzl/oracle-free:23-slim-faststart
+      - name: Oracle integration tests
+        run: sh scripts/check.sh tests/integration/oracle
+
+  kind:
+    name: kind
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync the workspace
+        run: uv sync --locked
+      - name: Create a kind cluster
+        uses: helm/kind-action@v1
+      - name: Prepare a service account and export its token
+        run: |
+          kubectl create namespace app-test
+          kubectl create serviceaccount modgudr-ci --namespace app-test
+          kubectl create role pod-reader --verb=get,list --resource=pods --namespace app-test
+          kubectl create rolebinding modgudr-ci-pod-reader --role=pod-reader \
+            --serviceaccount=app-test:modgudr-ci --namespace app-test
+          token="$(kubectl create token modgudr-ci --namespace app-test --duration=1h)"
+          echo "::add-mask::$token"
+          kubeconfig="$RUNNER_TEMP/kind-kubeconfig"
+          kind get kubeconfig > "$kubeconfig"
+          {
+            echo "MODGUDR_TEST_KIND=1"
+            echo "MODGUDR_KIND_KUBECONFIG=$kubeconfig"
+            echo "MODGUDR_KIND_TOKEN=$token"
+          } >> "$GITHUB_ENV"
+      - name: kind integration tests
+        run: sh scripts/check.sh tests/integration/kubectl_kind -m kind

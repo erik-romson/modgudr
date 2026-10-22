@@ -1,0 +1,5 @@
+#!/bin/sh
+# A fake uv for bats/install_l0.bats: it logs its arguments to $HOME/fake-uv.log and exits 0.
+# It installs nothing. The test points HOME at a temporary directory.
+echo "$*" >> "$HOME/fake-uv.log"
+exit 0
