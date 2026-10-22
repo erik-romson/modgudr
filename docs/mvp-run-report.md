@@ -56,3 +56,13 @@
 - **Step 16, `describe` on Oracle returns the columns of a `select … where 1 = 0`.** The header carries the names
   and wire types and there are no rows. The `describe` op contract accepts a `select` as well as a `describe`
   statement for it.
+- **Step 17, `kubectl cp` is a plugin invariant, not only `admin`.** M17 classes `cp` as admin, which an
+  admin-ceiling environment could allow. `cp` always has a local side, and the broker runs kubectl as the
+  developer: `cp ~/.azure/… pod:/tmp` would hand the agent the developer's Azure refresh token or prod
+  kubeconfig, and `cp pod:/x ~/…` would write the developer's files. That is the reason M17 gives for refusing
+  path-taking flags. The classifier still returns `kubectl:cp/pods` with risk `admin`, and the connector's
+  invariant rule `kubectl:cp/*` refuses it at layer `plugin-invariant` in every environment.
+- **Step 17, every kubectl call that names `secrets` is `secret`.** M17 names `get`/`describe` of secrets and
+  "any list containing `secrets`". The classifier applies it to every verb (`delete secret x`,
+  `create secret …`, `label secret x … -o yaml`, `logs secret/x`, `explain secrets`), because a write that
+  prints the object (`-o yaml`) shows its data. These calls are never allowed.

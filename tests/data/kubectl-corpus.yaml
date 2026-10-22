@@ -1,0 +1,706 @@
+# The kubectl classification corpus (M17; pre-plan §7.1, §7.2, §7.3, §7.8; edge cases KC-01 to
+# KC-04 and KC-09). Nothing here runs kubectl.
+#
+# Each row maps `argv` (the words after `kubectl`, split like a POSIX shell) to the action the
+# classifier must return: `action` (name) and `risk`, and optionally
+#   facts             these facts, compared exactly (lists as tuples)
+#   invariant         the plugin invariant that refuses it: an invariant hit (`--as`) or the pattern
+#                     of one of the connector's invariant rules (`kubectl:cp/*`); a row without one
+#                     must break none
+#   detail            a phrase the action's detail must contain
+#   requireName       met | unmet
+#   namespaces        met | unmet, under a `namespaces` constraint listing `namespaces` below
+#   defaultNamespace  the target's defaultNamespace for this row
+#   note
+# The format and its loader are in tests/support/kubectlcorpus.py.
+namespaces: [app]
+rows:
+  # --- requireName (KC-03) -----------------------------------------------------------------------
+  - argv: "-n app-test delete po web-1"
+    action: kubectl:delete/pods
+    risk: destructive
+    facts: { namespace: app-test, names: [web-1], all: false, selector: null }
+    requireName: met
+  - argv: "delete pod/web-1 pod/web-2"
+    action: kubectl:delete/pods
+    risk: destructive
+    facts: { names: [web-1, web-2], resources: [pods] }
+    requireName: met
+  - argv: "delete pod web-1"
+    action: kubectl:delete/pods
+    risk: destructive
+    facts: { names: [web-1] }
+    requireName: met
+  - argv: "delete pods --all"
+    action: kubectl:delete/pods
+    risk: destructive
+    facts: { names: [], all: true }
+    requireName: unmet
+  - argv: "delete pods -l app=x"
+    action: kubectl:delete/pods
+    risk: destructive
+    facts: { names: [], selector: app=x }
+    requireName: unmet
+  - argv: "delete pods --field-selector status.phase=Failed"
+    action: kubectl:delete/pods
+    risk: destructive
+    facts: { names: [] }
+    requireName: unmet
+  - argv: "delete pods"
+    action: kubectl:delete/pods
+    risk: destructive
+    facts: { names: [], all: false, selector: null }
+    requireName: unmet
+  - argv: "delete pods web-1 --all=false"
+    action: kubectl:delete/pods
+    risk: destructive
+    facts: { names: [web-1], all: false }
+    requireName: met
+  - argv: "scale --replicas=0 deploy -l app=x"
+    action: kubectl:scale/deployments
+    risk: write
+    facts: { names: [], selector: app=x }
+    requireName: unmet
+    note: "§7.8 sets no requireName on scale, so selector forms pass in test (KC-03)"
+  - argv: "scale --all --replicas=1 deploy"
+    action: kubectl:scale/deployments
+    risk: write
+    facts: { all: true }
+    requireName: unmet
+
+  # --- namespaces (KC-02): the constraint lists `app` --------------------------------------------
+  - argv: "get pods -n app"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: app, allNamespaces: false, clusterScoped: false }
+    namespaces: met
+  - argv: "get pods -napp"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: app }
+    namespaces: met
+  - argv: "get pods -n=app"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: app }
+    namespaces: met
+  - argv: "get pods --namespace app"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: app }
+    namespaces: met
+  - argv: "get pods --namespace=app"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: app }
+    namespaces: met
+  - argv: "-n app get pods"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: app }
+    namespaces: met
+    note: flags before the verb
+  - argv: "--namespace=x get pods -n app"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: app }
+    namespaces: met
+    note: last wins across the verb
+  - argv: "get pods -n a -n b"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: b }
+    namespaces: unmet
+  - argv: "get pods"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: default, allNamespaces: false }
+    namespaces: unmet
+  - argv: "get pods"
+    defaultNamespace: app
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: app }
+    namespaces: met
+    note: no -n resolves to the target's defaultNamespace
+  - argv: "get pods -n b"
+    defaultNamespace: app
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: b }
+    namespaces: unmet
+  - argv: "get pods -A"
+    action: kubectl:get/pods
+    risk: read
+    facts: { allNamespaces: true }
+    namespaces: unmet
+  - argv: "get pods --all-namespaces"
+    action: kubectl:get/pods
+    risk: read
+    facts: { allNamespaces: true }
+    namespaces: unmet
+  - argv: "get pods -A -n app"
+    action: kubectl:get/pods
+    risk: read
+    facts: { allNamespaces: true, namespace: app }
+    namespaces: unmet
+    note: -A never matches, whatever -n says
+  - argv: "get pods --all-namespaces=false -n app"
+    action: kubectl:get/pods
+    risk: read
+    facts: { allNamespaces: false }
+    namespaces: met
+  - argv: "get pods --all_namespaces"
+    action: kubectl:get/pods
+    risk: read
+    facts: { allNamespaces: true }
+    namespaces: unmet
+    note: kubectl normalises _ to - in flag names
+  - argv: "get nodes"
+    action: kubectl:get/nodes
+    risk: read
+    facts: { clusterScoped: true }
+    namespaces: unmet
+  - argv: "get nodes -n app"
+    action: kubectl:get/nodes
+    risk: read
+    facts: { clusterScoped: true, namespace: app }
+    namespaces: unmet
+  - argv: "get ns"
+    action: kubectl:get/namespaces
+    risk: read
+    facts: { clusterScoped: true }
+    namespaces: unmet
+  - argv: "get po,deploy,svc -n app"
+    action: kubectl:get/multiple
+    risk: read
+    facts: { resources: [pods, deployments, services], clusterScoped: false }
+    namespaces: met
+  - argv: "get pods,nodes -n app"
+    action: kubectl:get/multiple
+    risk: read
+    facts: { clusterScoped: true }
+    namespaces: unmet
+
+  # --- secret (KC-04): never allowable ------------------------------------------------------------
+  - argv: "get secrets"
+    action: kubectl:get/secrets
+    risk: secret
+  - argv: "describe secrets"
+    action: kubectl:describe/secrets
+    risk: secret
+  - argv: "describe secret x"
+    action: kubectl:describe/secrets
+    risk: secret
+    facts: { names: [x] }
+  - argv: "get pods,secrets"
+    action: kubectl:get/multiple
+    risk: secret
+    facts: { resources: [pods, secrets] }
+  - argv: "get secret/foo -o yaml"
+    action: kubectl:get/secrets
+    risk: secret
+    facts: { names: [foo] }
+  - argv: "get Secret.v1."
+    action: kubectl:get/secrets
+    risk: secret
+    note: the fully qualified core form
+  - argv: "get secrets.v1. foo"
+    action: kubectl:get/secrets
+    risk: secret
+  - argv: "config view --raw"
+    action: kubectl:config/view
+    risk: secret
+  - argv: "create token sa"
+    action: kubectl:create/token
+    risk: secret
+    facts: { names: [sa], resources: [serviceaccounts] }
+  - argv: "create token sa --duration=1h"
+    action: kubectl:create/token
+    risk: secret
+  - argv: "create secret generic x --from-literal=k=v"
+    action: kubectl:create/secrets
+    risk: secret
+  - argv: "delete secret x"
+    action: kubectl:delete/secrets
+    risk: secret
+    note: any call that names secrets is secret
+  - argv: "label secret x a=b -o yaml"
+    action: kubectl:label/secrets
+    risk: secret
+    note: a write that prints the object would show its data
+
+  # --- admin ---------------------------------------------------------------------------------------
+  - argv: "exec -it p -- sh"
+    action: kubectl:exec/pods
+    risk: admin
+    facts: { names: [p], namespace: default }
+  - argv: "exec p -c app -- ls -la /"
+    action: kubectl:exec/pods
+    risk: admin
+    facts: { names: [p] }
+    note: after -- everything is the command
+  - argv: "exec deploy/web -- date"
+    action: kubectl:exec/deployments
+    risk: admin
+    facts: { names: [web] }
+  - argv: "cp p:/x ."
+    action: kubectl:cp/pods
+    risk: admin
+    facts: { names: [p], namespace: default }
+    invariant: "kubectl:cp/*"
+    note: cp reads and writes the broker's files, so it is never allowed (run report, Deviations)
+  - argv: "cp ./x app/p:/tmp/x"
+    action: kubectl:cp/pods
+    risk: admin
+    facts: { names: [p], namespace: app }
+    invariant: "kubectl:cp/*"
+  - argv: "attach p"
+    action: kubectl:attach/pods
+    risk: admin
+    facts: { names: [p] }
+  - argv: "port-forward p 8080"
+    action: kubectl:port-forward/pods
+    risk: admin
+    facts: { names: [p] }
+  - argv: "port-forward svc/web 8080:80"
+    action: kubectl:port-forward/services
+    risk: admin
+    facts: { names: [web] }
+  - argv: "debug p"
+    action: kubectl:debug/pods
+    risk: admin
+    facts: { names: [p] }
+  - argv: "debug node/n1 -it --image=busybox"
+    action: kubectl:debug/nodes
+    risk: admin
+    facts: { names: [n1], clusterScoped: true }
+
+  # --- unknown --------------------------------------------------------------------------------------
+  - argv: "proxy"
+    action: kubectl:unknown
+    risk: unknown
+    detail: not supported
+  - argv: "edit deploy x"
+    action: kubectl:unknown
+    risk: unknown
+    detail: not supported
+  - argv: "config use-context x"
+    action: kubectl:unknown
+    risk: unknown
+    detail: not supported
+  - argv: "config view"
+    action: kubectl:unknown
+    risk: unknown
+    detail: not supported
+  - argv: "foo"
+    action: kubectl:unknown
+    risk: unknown
+    detail: plugins are not run
+  - argv: "get certificates.cert-manager.io"
+    action: kubectl:unknown
+    risk: unknown
+    detail: "resource 'certificates.cert-manager.io' is not in the catalogue"
+  - argv: "get events.events.k8s.io"
+    action: kubectl:unknown
+    risk: unknown
+    detail: is not in the catalogue
+    note: a qualified name must carry the kind's own group
+  - argv: "get all"
+    action: kubectl:unknown
+    risk: unknown
+    detail: "resource 'all' is not in the catalogue"
+  - argv: "apply view-last-applied deploy x"
+    action: kubectl:unknown
+    risk: unknown
+  - argv: "drain node-1"
+    action: kubectl:unknown
+    risk: unknown
+    detail: not supported
+  - argv: "get"
+    action: kubectl:unknown
+    risk: unknown
+    detail: needs a resource type
+  - argv: ""
+    action: kubectl:unknown
+    risk: unknown
+    detail: no kubectl verb
+  - argv: "get pods --frobnicate"
+    action: kubectl:unknown
+    risk: unknown
+    detail: unknown flag --frobnicate
+  - argv: "-A get pods"
+    action: kubectl:unknown
+    risk: unknown
+    detail: unknown flag -A
+    note: before the verb only global flags count
+  - argv: "-f x.yaml apply"
+    action: kubectl:unknown
+    risk: unknown
+  - argv: "-- get pods"
+    action: kubectl:unknown
+    risk: unknown
+    detail: before --
+  - argv: "get pods -o toml"
+    action: kubectl:unknown
+    risk: unknown
+    detail: unknown output format
+  - argv: "get pods -n ''"
+    action: kubectl:unknown
+    risk: unknown
+    detail: -n needs a namespace name
+  - argv: "get pods -n"
+    action: kubectl:unknown
+    risk: unknown
+    detail: -n needs a value
+  - argv: "get pod web-1 pod/web-2"
+    action: kubectl:unknown
+    risk: unknown
+    detail: type/name
+  - argv: "get pods -v=x"
+    action: kubectl:unknown
+    risk: unknown
+  - argv: "--profile=cpu get pods"
+    action: kubectl:unknown
+    risk: unknown
+    note: the profiler writes a file in the broker's working directory
+  - argv: "create -o yaml cm x"
+    action: kubectl:unknown
+    risk: unknown
+    detail: must come after
+  - argv: "--as=admin frobnicate pods"
+    action: kubectl:unknown
+    risk: unknown
+    invariant: --as
+    detail: "unknown verb 'frobnicate'"
+    note: an unparseable call still records the invariants it breaks (rule matrix L21)
+
+  # --- identity and connection flags (KC-01) --------------------------------------------------------
+  - argv: "--as=admin get pods"
+    action: kubectl:get/pods
+    risk: read
+    facts: { namespace: default }
+    invariant: --as
+  - argv: "--token x get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --token
+  - argv: "--kubeconfig f get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --kubeconfig
+  - argv: "-s https://x get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --server
+  - argv: "--context c get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --context
+  - argv: "--as-group=system:masters get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --as-group
+  - argv: "--as-uid 1 get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --as-uid
+  - argv: "--cluster c get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --cluster
+  - argv: "--user u get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --user
+  - argv: "--certificate-authority ca.crt get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --certificate-authority
+  - argv: "--client-certificate c.crt get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --client-certificate
+  - argv: "--client-key c.key get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --client-key
+  - argv: "--tls-server-name x get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --tls-server-name
+  - argv: "--username u get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --username
+  - argv: "--password p get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --password
+  - argv: "--cache-dir /tmp/c get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --cache-dir
+  - argv: "--insecure-skip-tls-verify get pods"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --insecure-skip-tls-verify
+  - argv: "get pods --insecure_skip_tls_verify=false"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --insecure-skip-tls-verify
+    note: any use counts, after the verb and under any spelling
+  - argv: "get pods --server=https://x"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --server
+  - argv: "create rolebinding rb --clusterrole=view --user=bob"
+    action: kubectl:create/rolebindings
+    risk: write
+    invariant: --user
+    note: the local --user shares the identity flag's name; refusing it is stricter
+
+  # --- path-taking flags (KC-01) ---------------------------------------------------------------------
+  - argv: "apply -f x.yaml"
+    action: kubectl:apply
+    risk: write
+    facts: { resources: [] }
+    invariant: --filename
+  - argv: "get -f x.yaml"
+    action: kubectl:get
+    risk: read
+    invariant: --filename
+  - argv: "delete -f x.yaml"
+    action: kubectl:delete
+    risk: destructive
+    invariant: --filename
+  - argv: "apply -k dir"
+    action: kubectl:apply
+    risk: write
+    invariant: --kustomize
+  - argv: "get --raw /api/v1/namespaces/x/secrets"
+    action: kubectl:get
+    risk: read
+    invariant: --raw
+  - argv: "get pods -o go-template-file=/etc/x"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --output=go-template-file
+  - argv: "get pods -o jsonpath-file=/etc/x"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --output=jsonpath-file
+  - argv: "get pods -o go-template-file --template=/etc/x"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --output=go-template-file
+    note: "`--template` with a file"
+  - argv: "get pods -o custom-columns-file=/etc/x"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --output=custom-columns-file
+  - argv: "get pods -o go-template --template={{.kind}}"
+    action: kubectl:get/pods
+    risk: read
+    note: a template given inline reads no file
+  - argv: "create cm x --from-file=~/.azure/f"
+    action: kubectl:create/configmaps
+    risk: write
+    facts: { names: [x] }
+    invariant: --from-file
+  - argv: "create configmap x --from-env-file=/etc/x"
+    action: kubectl:create/configmaps
+    risk: write
+    invariant: --from-env-file
+  - argv: "patch deploy x --patch-file=/etc/x"
+    action: kubectl:patch/deployments
+    risk: write
+    invariant: --patch-file
+  - argv: "exec -f pod.yaml -- ls"
+    action: kubectl:exec
+    risk: admin
+    invariant: --filename
+  - argv: "create secret tls x --cert=/etc/c --key=/etc/k"
+    action: kubectl:create/secrets
+    risk: secret
+    invariant: --cert
+
+  # --- debug and output flags (KC-01) ---------------------------------------------------------------
+  - argv: "get pods -v=9"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --v
+  - argv: "get pods -v6"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --v
+  - argv: "get pods --v=5"
+    action: kubectl:get/pods
+    risk: read
+    note: below 6 is allowed
+  - argv: "get pods --vmodule=round_trippers=9"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --vmodule
+  - argv: "get pods --log-file=/tmp/x"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --log-file
+  - argv: "get pods --profile-output=/tmp/x"
+    action: kubectl:get/pods
+    risk: read
+    invariant: --profile-output
+
+  # --- follow and watch (A13, KC-09) ---------------------------------------------------------------
+  - argv: "logs -f pod/x"
+    action: kubectl:logs/pods
+    risk: read
+    facts: { follow: true, names: [x] }
+  - argv: "logs --follow x"
+    action: kubectl:logs/pods
+    risk: read
+    facts: { follow: true, names: [x] }
+  - argv: "logs x"
+    action: kubectl:logs/pods
+    risk: read
+    facts: { follow: false }
+  - argv: "logs -f -l app=web"
+    action: kubectl:logs/pods
+    risk: read
+    facts: { follow: true, names: [], selector: app=web }
+  - argv: "logs deploy/web -c app"
+    action: kubectl:logs/deployments
+    risk: read
+    facts: { names: [web] }
+  - argv: "get pods -w"
+    action: kubectl:get/pods
+    risk: read
+    facts: { follow: true }
+  - argv: "get pods --watch-only"
+    action: kubectl:get/pods
+    risk: read
+    facts: { follow: true }
+
+  # --- rollout, scale, replace, apply ----------------------------------------------------------------
+  - argv: "rollout restart deploy/po"
+    action: kubectl:rollout/restart
+    risk: write
+    facts: { names: [po], resources: [deployments] }
+  - argv: "rollout status deploy/po"
+    action: kubectl:rollout/status
+    risk: read
+    facts: { follow: true }
+    note: rollout status watches by default
+  - argv: "rollout status deploy/po --watch=false"
+    action: kubectl:rollout/status
+    risk: read
+    facts: { follow: false }
+  - argv: "rollout history deploy/po"
+    action: kubectl:rollout/history
+    risk: read
+  - argv: "rollout undo deploy/po"
+    action: kubectl:rollout/undo
+    risk: write
+  - argv: "scale --replicas=0 deploy/po"
+    action: kubectl:scale/deployments
+    risk: write
+    facts: { names: [po] }
+  - argv: "replace --force -f x"
+    action: kubectl:replace
+    risk: destructive
+    invariant: --filename
+  - argv: "replace -f x"
+    action: kubectl:replace
+    risk: write
+    invariant: --filename
+  - argv: "apply --prune -f x -l app=x"
+    action: kubectl:apply
+    risk: destructive
+    invariant: --filename
+
+  # --- several resource types ----------------------------------------------------------------------
+  - argv: "delete pods,jobs x"
+    action: kubectl:delete/multiple
+    risk: destructive
+    facts: { names: [x], resources: [pods, jobs] }
+  - argv: "delete pod/a job/b"
+    action: kubectl:delete/multiple
+    risk: destructive
+    facts: { names: [a, b], resources: [pods, jobs] }
+  - argv: "delete pods,po x"
+    action: kubectl:delete/pods
+    risk: destructive
+    note: one type spelled twice is one type
+  - argv: "get svc,cm"
+    action: kubectl:get/multiple
+    risk: read
+    facts: { resources: [services, configmaps] }
+
+  # --- other reads and writes -----------------------------------------------------------------------
+  - argv: "top pods"
+    action: kubectl:top/pods
+    risk: read
+  - argv: "top node"
+    action: kubectl:top/nodes
+    risk: read
+    facts: { clusterScoped: true }
+  - argv: "explain pods.spec.containers"
+    action: kubectl:explain/pods
+    risk: read
+  - argv: "auth can-i --list"
+    action: kubectl:auth/can-i
+    risk: read
+  - argv: "auth can-i delete pods -n app"
+    action: kubectl:auth/can-i
+    risk: read
+    facts: { namespace: app, clusterScoped: false }
+    namespaces: met
+  - argv: "get deploy.v1.apps x"
+    action: kubectl:get/deployments
+    risk: read
+    facts: { names: [x] }
+  - argv: "get deployments.apps"
+    action: kubectl:get/deployments
+    risk: read
+  - argv: "get Deployment/x"
+    action: kubectl:get/deployments
+    risk: read
+  - argv: "get events"
+    action: kubectl:get/events
+    risk: read
+  - argv: "get ev -A"
+    action: kubectl:get/events
+    risk: read
+    facts: { allNamespaces: true }
+  - argv: "describe nodes n1"
+    action: kubectl:describe/nodes
+    risk: read
+    facts: { names: [n1], clusterScoped: true }
+  - argv: "get crd"
+    action: kubectl:get/customresourcedefinitions
+    risk: read
+    facts: { clusterScoped: true }
+  - argv: "label pods foo unhealthy=true"
+    action: kubectl:label/pods
+    risk: write
+    facts: { names: [foo] }
+  - argv: "annotate deploy/web a=b"
+    action: kubectl:annotate/deployments
+    risk: write
+    facts: { names: [web] }
+  - argv: "patch deploy web -p '{\"spec\":{\"replicas\":2}}'"
+    action: kubectl:patch/deployments
+    risk: write
+    facts: { names: [web] }
+  - argv: "create deployment web --image=nginx -- sleep 1"
+    action: kubectl:create/deployments
+    risk: write
+    facts: { names: [web] }
+  - argv: "create namespace x"
+    action: kubectl:create/namespaces
+    risk: write
+    facts: { clusterScoped: true }
+  - argv: "delete ns app-test"
+    action: kubectl:delete/namespaces
+    risk: destructive
+    facts: { clusterScoped: true, names: [app-test] }
