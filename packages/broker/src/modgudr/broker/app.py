@@ -761,6 +761,7 @@ class Broker:
                     audited=True,
                 ) from None
             except StoreError as exc:
+                session.unlock_failed()
                 await self.audit.event("unlock.failed", audit_id, **fields, code="upstream")
                 raise Refused(
                     "upstream",
@@ -770,6 +771,7 @@ class Broker:
                     audited=True,
                 ) from None
             except Exception as exc:
+                session.unlock_failed()
                 await self.audit.event("unlock.failed", audit_id, **fields, code="internal")
                 raise Refused(
                     "internal",

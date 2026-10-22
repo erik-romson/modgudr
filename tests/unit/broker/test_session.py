@@ -16,7 +16,7 @@ from modgudr.broker.session import (
     LockReason,
     Session,
 )
-from modgudr.spi import UnlockRefused
+from modgudr.spi import StoreError, UnlockRefused
 from tests.support.brokerfx import (
     BrokerEnv,
     FakeClock,
@@ -185,6 +185,22 @@ async def test_six_unlocks_in_a_minute_the_sixth_is_throttled_untested(
     assert len(records(env, "unlock")) == 1
     text = audit_text(env.audit_dir)
     assert "guess-4567" not in text and "right-token-0123" not in text
+
+
+async def test_store_errors_count_toward_the_failed_unlock_limit(
+    env: BrokerEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with running(env) as broker:
+
+        async def unreachable(credential: str) -> None:
+            raise StoreError("bws could not check the access token (exit 1)")
+
+        monkeypatch.setattr(broker.store, "unlock", unreachable)
+        for _ in range(FAILED_UNLOCK_LIMIT):
+            err = error(await call(env.human_socket, "unlock", args={"credential": "guess-4567"}))
+            assert err["code"] == "upstream"
+        sixth = error(await call(env.human_socket, "unlock", args={"credential": "guess-4567"}))
+        assert sixth["code"] == "throttled"
 
 
 async def test_idle_never_fires_with_calls_every_50_minutes_and_absolute_fires_at_10_hours(
