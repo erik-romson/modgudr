@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
@@ -165,7 +164,7 @@ class SnowflakeDriver:
         except KeyUnusable as exc:
             raise UpstreamFailure(f"the Snowflake private key cannot be used: {exc}") from None
         kwargs = connect_kwargs(self._config, der, timeout)
-        os.environ["SF_TELEMETRY_DISABLE_CONNECTION_SHAPE"] = "true"
+        # The daemon's hardening sets SF_TELEMETRY_DISABLE_CONNECTION_SHAPE for the whole process.
         try:
             conn = snowflake.connector.connect(**kwargs)
         except errors.Error as exc:
