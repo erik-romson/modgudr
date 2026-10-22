@@ -1,7 +1,7 @@
 """The Python API (§6.3, MVP subset): `modgudr.connect()` and what it returns.
 
-    mg = modgudr.connect()
-    result = mg.sql("prod-ro").query("select id from po where status = :s", s="OPEN")
+    client = modgudr.connect()
+    result = client.sql("prod-ro").query("select id from po where status = :s", s="OPEN")
     for row in result:          # named tuples, streamed as they arrive
         print(row.ID)
 

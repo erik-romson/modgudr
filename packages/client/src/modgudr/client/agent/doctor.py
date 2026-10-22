@@ -319,10 +319,14 @@ def collect_lines(
     found = ctx.which("mg")
     if found:
         lines.append(
-            Line(INFO, f"`mg` on PATH is {found}, an editor on macOS; the command is modgudr")
+            Line(
+                INFO,
+                f"{found} is on PATH and is not modgudr (on macOS it is an editor); "
+                "the command is modgudr",
+            )
         )
     else:
-        lines.append(Line(INFO, "no `mg` on PATH; the command is modgudr"))
+        lines.append(Line(INFO, "no other command shadows the short name; the command is modgudr"))
     return lines, isolated_none
 
 

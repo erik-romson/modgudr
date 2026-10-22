@@ -249,9 +249,9 @@ def test_an_editable_install_in_a_writable_directory_warns(world: World) -> None
 
 def test_the_mg_name_is_an_info_line(world: World) -> None:
     lines, _ = collect_lines(world.context(which=lambda _n: "/usr/bin/mg"), world.status())
-    assert any("/usr/bin/mg" in t for t in texts(lines, INFO))
+    assert any("/usr/bin/mg is on PATH and is not modgudr" in t for t in texts(lines, INFO))
     lines, _ = collect_lines(world.context(), world.status())
-    assert any("no `mg` on PATH" in t for t in texts(lines, INFO))
+    assert any("no other command shadows the short name" in t for t in texts(lines, INFO))
 
 
 def test_a_broker_that_is_down_fails_and_the_rest_still_runs(world: World) -> None:

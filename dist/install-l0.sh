@@ -82,7 +82,7 @@ run uv tool install --from "$REPO/packages/broker" modgudr-broker \
 
 # The short alias, only when nothing else is called that.
 if command -v mg > /dev/null 2>&1; then
-    echo "# an 'mg' command already exists on this machine; no alias is created"
+    echo "# the short alias name is already taken on this machine; no alias is created"
 else
     run ln -s modgudr "$BIN/mg"
 fi
