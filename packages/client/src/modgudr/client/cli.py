@@ -23,9 +23,17 @@ import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, BinaryIO, NoReturn
 
 from modgudr.client import paths
+from modgudr.client.agent.setup import (
+    DROPIN_DIR,
+    DROPIN_FILE,
+    HOOK_FILE,
+    INSTALL_FILE,
+    run_setup,
+)
 from modgudr.client.api import truncation_note
 from modgudr.client.errors import BrokerUnavailable, Error, LimitExceeded, Throttled, UsageError
 from modgudr.client.params import parse_cli_params
@@ -77,6 +85,7 @@ commands:
   status [--quiet|--json]           broker state (--quiet: exit 0 unlocked, 3 locked, 6 down)
   unlock | lock                     the store session (your own terminal only)
   audit tail [options]              recent audit records (your own terminal only)
+  agent-setup claude [--out DIR]    generate the Claude Code managed settings and hook
 
 The environment of a call is system@env, else $MODGUDR_ENV, else the policy's default.
 Exit codes: 0 ok, 2 denied, 3 locked, 4 truncated or timed out, 5 upstream error,
@@ -509,6 +518,35 @@ def cmd_audit(argv: Sequence[str]) -> int:
     return EXIT_OK
 
 
+def cmd_agent_setup(argv: Sequence[str]) -> int:
+    parser = _parser(
+        "agent-setup",
+        "Generate the managed settings, the hook and the install steps for a coding agent. "
+        "Nothing is installed: the steps need sudo and are printed.",
+    )
+    sub = parser.add_subparsers(dest="agent", required=True, metavar="claude")
+    claude = sub.add_parser("claude", help="Claude Code")
+    claude.add_argument(
+        "--out", default="modgudr-agent-setup", help="output directory (default %(default)s)"
+    )
+    claude.add_argument(
+        "--allow-domain",
+        action="append",
+        default=[],
+        metavar="D",
+        help="a domain the sandbox may reach (repeatable; default pypi.org, "
+        "files.pythonhosted.org, registry.npmjs.org)",
+    )
+    claude.add_argument("--force", action="store_true", help="overwrite an earlier output")
+    ns = parser.parse_args(list(argv))
+    out = Path(ns.out)
+    instructions = run_setup(out, ns.allow_domain, force=ns.force)
+    _note(f"wrote {out.absolute()}: {DROPIN_DIR}/{DROPIN_FILE}, {HOOK_FILE}, {INSTALL_FILE}")
+    sys.stdout.write(instructions)
+    sys.stdout.flush()
+    return EXIT_OK
+
+
 def _later(name: str) -> Callable[[Sequence[str]], int]:
     def stub(argv: Sequence[str]) -> int:
         _note(f"{name}: {LATER}")
@@ -527,7 +565,7 @@ COMMANDS: Mapping[str, Callable[[Sequence[str]], int]] = {
     "lock": cmd_lock,
     "audit": cmd_audit,
     "login": _later("login"),
-    "agent-setup": _later("agent-setup"),
+    "agent-setup": cmd_agent_setup,
     "agent": _later("agent"),
     "doctor": _later("doctor"),
     "agent-docs": _later("agent-docs"),
