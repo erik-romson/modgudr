@@ -252,7 +252,8 @@ def _command(node: exp.Command, rules: DialectRules) -> _Statement:
     except Exception as exc:
         raise _Refused(f"{head} …: {parse_message(exc)}") from exc
     said = [head, *tail_words]
-    for rule in (*rules.commands, *_COMMON_COMMANDS):
+    shared = (r for r in _COMMON_COMMANDS if r.action not in rules.dropped_shared_commands)
+    for rule in (*rules.commands, *shared):
         if rule.matches(said):
             return _Statement(rule.action, rule.risk, "other")
     shown = " ".join(said[:3])
@@ -461,6 +462,10 @@ class _Walk:
         found = self.rules.functions.lookup(name)
         if found is not None:
             self.raise_to(found)
+        if self.rules.refine_call is not None:
+            refined = self.rules.refine_call(name, node)
+            if refined is not None:
+                self.raise_to(refined)
 
     def node(self, node: exp.Expr) -> None:
         if isinstance(node, exp.Select):

@@ -8,7 +8,7 @@ in `modgudr.sql.classify` applies them; a dialect never walks a syntax tree itse
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from sqlglot import exp
@@ -159,3 +159,10 @@ class DialectRules:
     commands: tuple[WordRule, ...] = ()
     #: Words that are a whole statement's first word only in a PL/SQL or scripting block.
     block_words: frozenset[str] = field(default_factory=lambda: frozenset({"BEGIN", "DECLARE"}))
+    #: Looks at one call after the catalogue did: gets the normalised function name and the call
+    #: node, returns a class to raise the statement to, or None. For rules that depend on an
+    #: argument (Oracle `DBMS_METADATA.GET_DDL('USER', …)`).
+    refine_call: Callable[[str, exp.Func], Risk | None] | None = None
+    #: Actions of the shared `exp.Command` rules this dialect does not take over (`explain` for
+    #: Oracle, whose only form is `EXPLAIN PLAN`, a rule of its own in `commands`).
+    dropped_shared_commands: frozenset[str] = frozenset()

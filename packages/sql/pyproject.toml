@@ -14,6 +14,7 @@ sql = "modgudr.sql.connector:SqlConnector"
 
 [project.entry-points."modgudr.sql_dialects"]
 snowflake = "modgudr.sql.dialects.snowflake:SnowflakeDialect"
+oracle = "modgudr.sql.dialects.oracle:OracleDialect"
 
 [tool.uv.sources]
 modgudr-broker = { workspace = true }

@@ -1,0 +1,452 @@
+# The Oracle classification corpus (M12, M13; pre-plan §7.1, §7.2, §8.1; plan 2.2).
+#
+# Each row maps a `sql` string to the action the Oracle dialect must return: `action` (name),
+# `risk`, and optionally `facts` (compared exactly), `invariant` (the plugin invariant that refuses
+# it; a row without one must break none) and `requireWhere` (met | unmet). The format and its
+# loader are in tests/support/sqlcorpus.py.
+#
+# The diagnostic queries are written fresh over generic Oracle dictionary and performance views;
+# no company schema, name or host appears here (D27).
+dialect: oracle
+rows:
+  # --- the twelve diagnostic queries: reads over generic views -----------------------------------
+  - sql: |-
+      select sid, serial#, username, status, sql_id, event, seconds_in_wait
+      from v$session
+      where username = :USERNAME and type = 'USER'
+      order by seconds_in_wait desc nulls first
+      fetch first 20 rows only
+    action: sql:select
+    risk: read
+    facts: { statement: select, kind: query, tables: [v$session] }
+  - sql: |-
+      select sql_id, child_number, executions, elapsed_time, sql_text
+      from v$sql
+      where parsing_schema_name = :USERNAME and last_active_time >= :FROM_TS
+      order by elapsed_time desc
+      fetch first 10 rows only
+    action: sql:select
+    risk: read
+    facts: { tables: [v$sql] }
+  - sql: |-
+      select sql_id, executions, buffer_gets, disk_reads, rows_processed
+      from v$sqlarea
+      where sql_id = :SQL_ID
+    action: sql:select
+    risk: read
+    facts: { tables: [v$sqlarea] }
+  - sql: |-
+      select sql_id, position, name, datatype_string, last_captured
+      from v$sql_bind_capture
+      where sql_id = :SQL_ID
+      order by child_number, position
+    action: sql:select
+    risk: read
+    facts: { tables: [v$sql_bind_capture] }
+  - sql: |-
+      select sample_time, session_id, session_serial#, sql_id, event, wait_class
+      from v$active_session_history
+      where sample_time >= to_timestamp_tz(:FROM_TS || ' +02:00', 'YYYY-MM-DD"T"HH24:MI:SS TZH:TZM')
+        and user_id = (select user_id from all_users where username = :USERNAME)
+      order by sample_time nulls first
+      fetch first 100 rows only
+    action: sql:select
+    risk: read
+    facts: { tables: [v$active_session_history, all_users], functions: [TO_TIMESTAMP_TZ] }
+  - sql: |-
+      select t.addr, t.xidusn, t.xidslot, t.status, s.username, s.serial#
+      from v$transaction t
+      join v$session s on s.taddr = t.addr
+      where s.username = :USERNAME
+    action: sql:select
+    risk: read
+    facts: { tables: [v$transaction, v$session] }
+  - sql: |-
+      select i.owner, i.index_name, i.index_type, i.status, c.column_name, c.column_position
+      from dba_indexes i
+      join dba_ind_columns c on c.index_owner = i.owner and c.index_name = i.index_name
+      where i.table_owner = :OWNER and i.table_name = :TABLE_NAME
+      order by i.index_name, c.column_position
+    action: sql:select
+    risk: read
+    facts: { tables: [dba_indexes, dba_ind_columns] }
+  - sql: |-
+      select owner, job_name, enabled, state, next_run_date, failure_count
+      from dba_scheduler_jobs
+      where owner = :OWNER
+      order by next_run_date nulls first
+    action: sql:select
+    risk: read
+    facts: { tables: [dba_scheduler_jobs] }
+  - sql: |-
+      select owner, job_name, session_id, running_instance, elapsed_time
+      from dba_scheduler_running_jobs
+      where owner = :OWNER
+    action: sql:select
+    risk: read
+    facts: { tables: [dba_scheduler_running_jobs] }
+  - sql: |-
+      select log_date, owner, job_name, status, error#, run_duration
+      from dba_scheduler_job_run_details
+      where log_date >= :FROM_TS and status <> 'SUCCEEDED'
+      order by log_date desc
+      fetch first 50 rows only
+    action: sql:select
+    risk: read
+    facts: { tables: [dba_scheduler_job_run_details] }
+  - sql: |-
+      select owner, table_name, num_rows, blocks, last_analyzed, stale_stats
+      from dba_tab_statistics
+      where owner = :OWNER and table_name = :TABLE_NAME
+    action: sql:select
+    risk: read
+    facts: { tables: [dba_tab_statistics] }
+  - sql: |-
+      select s.sid, s.serial#, s.username, q.sql_text, b.name, b.value_string
+      from v$session s
+      join v$sql q on q.sql_id = s.sql_id
+      left join v$sql_bind_capture b on b.sql_id = q.sql_id and b.child_number = q.child_number
+      where s.username = :USERNAME
+      order by b.position nulls first
+      fetch first 200 rows only
+    action: sql:select
+    risk: read
+    facts: { tables: [v$session, v$sql, v$sql_bind_capture] }
+
+  # --- secret objects (§7.2) ---------------------------------------------------------------------
+  - sql: |-
+      select s.sid, s.serial#, u.username, u.password
+      from v$session s join dba_users u on u.username = s.username
+    action: sql:select
+    risk: secret
+    facts: { tables: [v$session, dba_users] }
+  - sql: "select name, password from sys.user$"
+    action: sql:select
+    risk: secret
+  - sql: "select name, host, userid, passwordx from sys.link$"
+    action: sql:select
+    risk: secret
+  - sql: "select * from user$"
+    action: sql:select
+    risk: secret
+  - sql: "select * from sys.user_history$"
+    action: sql:select
+    risk: secret
+  - sql: "select db_link, username, host from dba_db_links"
+    action: sql:select
+    risk: secret
+  - sql: "select * from \"DBA_USERS\""
+    action: sql:select
+    risk: secret
+    note: quotes and case are normalised
+  - sql: "select * from SYS.DBA_USERS"
+    action: sql:select
+    risk: secret
+  - sql: "select * from (select username from dba_users) where username like 'A%'"
+    action: sql:select
+    risk: secret
+    note: in a subquery
+  - sql: "with u as (select username from dba_users) select * from u"
+    action: sql:select
+    risk: secret
+    note: in a CTE
+  - sql: "select 1 from dual where exists (select 1 from dba_users)"
+    action: sql:select
+    risk: secret
+    note: in a WHERE subquery
+  - sql: "select username, created from all_users"
+    action: sql:select
+    risk: read
+    note: ALL_USERS carries no password hash
+
+  # --- dictionary and performance view spellings (read) ------------------------------------------
+  - sql: "select * from V$SQL"
+    action: sql:select
+    risk: read
+  - sql: "select * from \"V$SQL\""
+    action: sql:select
+    risk: read
+  - sql: "select * from gv$sql"
+    action: sql:select
+    risk: read
+  - sql: "select * from sys.v_$sql"
+    action: sql:select
+    risk: read
+  - sql: "select * from SYS.V$SQL"
+    action: sql:select
+    risk: read
+  - sql: "select * from sys.gv_$session"
+    action: sql:select
+    risk: read
+  - sql: "select * from dba_tables"
+    action: sql:select
+    risk: read
+  - sql: "select * from all_tab_columns where table_name = :T"
+    action: sql:select
+    risk: read
+
+  # --- admin functions: the supplied packages, database links ------------------------------------
+  - sql: "select utl_http.request('http://x/') from dual"
+    action: sql:select
+    risk: admin
+    facts: { functions: [UTL_HTTP.REQUEST] }
+  - sql: "select sys.utl_http.request(x) from dual"
+    action: sql:select
+    risk: admin
+    facts: { functions: [UTL_HTTP.REQUEST] }
+    note: the SYS prefix is dropped
+  - sql: "select 1 from dual where utl_http.request('http://x/') is not null"
+    action: sql:select
+    risk: admin
+    note: in WHERE
+  - sql: "with c as (select utl_http.request('http://x/') r from dual) select * from c"
+    action: sql:select
+    risk: admin
+    note: in a CTE
+  - sql: "select dbms_scheduler.run_job('x') from dual"
+    action: sql:select
+    risk: admin
+    note: a package function inside a select
+  - sql: "select utl_file.fopen('D', 'f', 'w') from dual"
+    action: sql:select
+    risk: admin
+  - sql: "select owa_util.get_cgi_env('x') from dual"
+    action: sql:select
+    risk: admin
+  - sql: "select htf.escape_sc(x) from t"
+    action: sql:select
+    risk: admin
+  - sql: "select apex_util.get_session_state('x') from dual"
+    action: sql:select
+    risk: admin
+  - sql: "select ctx_query.count_hits('i', 'x') from dual"
+    action: sql:select
+    risk: admin
+  - sql: "select * from po@remote_link"
+    action: sql:select
+    risk: admin
+    note: a database link leaves the database
+  - sql: "select pkg.fn@link(x) from dual"
+    action: sql:select
+    risk: admin
+    note: a function over a database link
+  - sql: "select dbms_lob.loadfromfile(a, b, c) from dual"
+    action: sql:select
+    risk: admin
+    note: DBMS_LOB outside the read allowlist
+
+  # --- the read allowlist and the GET_DDL argument rule ------------------------------------------
+  - sql: "select * from table(dbms_xplan.display_cursor(:sql_id, :child, :fmt))"
+    action: sql:select
+    risk: read
+    facts: { functions: [TABLE, DBMS_XPLAN.DISPLAY_CURSOR] }
+  - sql: "select dbms_metadata.get_ddl('TABLE', 'T', 'O') from dual"
+    action: sql:select
+    risk: read
+  - sql: "select dbms_metadata.get_granted_ddl('ROLE_GRANT', 'X') from dual"
+    action: sql:select
+    risk: read
+  - sql: "select dbms_metadata.get_ddl('USER', 'X') from dual"
+    action: sql:select
+    risk: secret
+    note: a user's DDL holds the password hash
+  - sql: "select dbms_metadata.get_ddl('db_link', 'L') from dual"
+    action: sql:select
+    risk: secret
+  - sql: "select sys.dbms_metadata.get_ddl('USER', 'X') from dual"
+    action: sql:select
+    risk: secret
+  - sql: "select dbms_metadata.get_ddl(:t, :n) from dual"
+    action: sql:select
+    risk: secret
+    note: the object type is not a string literal
+  - sql: "select dbms_lob.substr(c, 100, 1) from t"
+    action: sql:select
+    risk: read
+  - sql: "select dbms_lob.getlength(c) from t"
+    action: sql:select
+    risk: read
+
+  # --- PL/SQL blocks and calls (first tokens, Command) -------------------------------------------
+  - sql: "begin execute immediate 'delete from po'; end;"
+    action: sql:plsql
+    risk: admin
+  - sql: "begin my_proc; end;"
+    action: sql:plsql
+    risk: admin
+    note: refused before parsing; it would parse as a transaction
+  - sql: "declare x number; begin null; end;"
+    action: sql:plsql
+    risk: admin
+  - sql: "start transaction"
+    action: sql:plsql
+    risk: admin
+    note: START is a first token of the scripting class
+  - sql: "call dbms_scheduler.run_job('X')"
+    action: sql:plsql
+    risk: admin
+  - sql: "execute immediate 'select 1 from dual'"
+    action: sql:plsql
+    risk: admin
+  - sql: "call f() ; drop table t"
+    action: sql:plsql
+    risk: admin
+    invariant: multi-statement
+
+  # --- plugin invariants: session state and transaction control ----------------------------------
+  - sql: "alter session set current_schema = X"
+    action: sql:session
+    risk: admin
+    invariant: "sql:session"
+  - sql: "set role app_admin"
+    action: sql:session
+    risk: admin
+    invariant: "sql:session"
+  - sql: "set transaction read write"
+    action: sql:session
+    risk: admin
+    invariant: "sql:session"
+  - sql: "commit"
+    action: sql:transaction
+    risk: admin
+    invariant: "sql:transaction"
+  - sql: "rollback"
+    action: sql:transaction
+    risk: admin
+    invariant: "sql:transaction"
+
+  # --- statements outside the whitelist ----------------------------------------------------------
+  - sql: "savepoint s"
+    action: sql:unknown
+    risk: unknown
+    note: parses as a bare Alias; the whitelist refuses it
+  - sql: "exec p"
+    action: sql:unknown
+    risk: unknown
+    note: parses as a bare Alias; the whitelist refuses it
+  - sql: "select x into v from dual"
+    action: sql:unknown
+    risk: unknown
+    note: SELECT … INTO
+  - sql: "lock table po in exclusive mode"
+    action: sql:unknown
+    risk: unknown
+    note: sqlglot cannot parse it; never read
+  - sql: "select httpuritype('http://x/').getclob() from dual"
+    action: sql:unknown
+    risk: unknown
+    note: a function called through an expression
+  - sql: "explain analyze delete from po where id = 1"
+    action: sql:unknown
+    risk: unknown
+    note: not Oracle syntax; Oracle's only EXPLAIN is EXPLAIN PLAN
+  - sql: ""
+    action: sql:unknown
+    risk: unknown
+  - sql: "select * from t where id = :1"
+    action: sql:unknown
+    risk: unknown
+    note: a positional bind does not parse; the bind scanner refuses it before this point too
+
+  # --- writes and locks --------------------------------------------------------------------------
+  - sql: "select seq.nextval from dual"
+    action: sql:select
+    risk: write
+    note: NEXTVAL changes the sequence
+  - sql: "select seq.currval from dual"
+    action: sql:select
+    risk: write
+  - sql: "select * from po for update"
+    action: sql:select
+    risk: write
+    note: FOR UPDATE takes row locks
+  - sql: "insert all into a values (1) into b values (2) select 1 from dual"
+    action: sql:insert
+    risk: write
+    facts: { statement: insert, kind: dml }
+  - sql: "merge into t using s on (t.id = s.id) when matched then update set t.a = s.a"
+    action: sql:merge
+    risk: write
+  - sql: "merge into t using s on (t.id = s.id) when matched then delete"
+    action: sql:merge
+    risk: destructive
+  - sql: "insert into t (a) values (:a)"
+    action: sql:insert
+    risk: write
+  - sql: "update t set a = :a where id = :id"
+    action: sql:update
+    risk: write
+    requireWhere: met
+  - sql: "truncate table t"
+    action: sql:truncate
+    risk: destructive
+  - sql: "create table x as select 1 a from dual"
+    action: sql:ddl.create
+    risk: admin
+  - sql: "drop table t"
+    action: sql:ddl.drop
+    risk: destructive
+  - sql: "grant select on t to u"
+    action: sql:grant
+    risk: admin
+  - sql: "revoke select on t from u"
+    action: sql:revoke
+    risk: admin
+
+  # --- EXPLAIN PLAN: only the `plan` op runs it (M14) --------------------------------------------
+  - sql: "explain plan for select * from dual"
+    action: sql:explain
+    risk: read
+  - sql: "explain plan set statement_id = 'x' for select utl_http.request('u') from dual"
+    action: sql:explain
+    risk: read
+    note: the function catalogue never applies inside a Command tail
+
+  # --- requireWhere ------------------------------------------------------------------------------
+  - sql: "delete from po where 1=1"
+    action: sql:delete
+    risk: destructive
+    requireWhere: unmet
+  - sql: "delete from po"
+    action: sql:delete
+    risk: destructive
+    requireWhere: unmet
+  - sql: "delete from po where id = :id"
+    action: sql:delete
+    risk: destructive
+    requireWhere: met
+  - sql: "update t set a = 1 where id = id"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+  - sql: "update t set a = 1 where \"ID\" = id"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+    note: Oracle folds the unquoted name to upper case, so both sides are the same column
+  - sql: "update t set a = 1"
+    action: sql:update
+    risk: write
+    requireWhere: unmet
+
+  # --- statement count and quoting ---------------------------------------------------------------
+  - sql: "select q'[it's; drop]' from dual"
+    action: sql:select
+    risk: read
+    note: an alternative-quoting literal is one token; one statement
+  - sql: "select 1 from dual;"
+    action: sql:select
+    risk: read
+    note: one trailing ';' is allowed
+  - sql: "select 1 from dual; select 2 from dual"
+    action: sql:select
+    risk: read
+    invariant: multi-statement
+  - sql: "select 'a;b' from dual"
+    action: sql:select
+    risk: read
+  - sql: "select myfn(1) from dual"
+    action: sql:select
+    risk: read
+    facts: { functions: [MYFN] }
+    note: an unknown function is read (A9)
