@@ -359,7 +359,7 @@ case fix that first.
 
 The developer ran R1 to R5 by hand on 2026-10-23, against the real Bitwarden cloud, a real Snowflake account, the
 CBSLink Oracle databases over the VPN and a real AKS cluster. R1, R2 and R5 pass. R3 passes except for 22b and 22c,
-which stay open. R4 found one bug, now fixed; its VPN-down check is still to run.
+which stay open. R4 passes after two bug fixes.
 
 **R1, install.** `install-l0.sh` ran without `--dry-run` for the first time. The R1 row first left out the `mkdir` of
 the policy directory, and `install` does not create a missing parent: it failed with
@@ -415,7 +415,11 @@ as `secret` (`plugin-invariant`). Findings:
   `--schema` sets `CURRENT_SCHEMA`, which `all_objects` ignores. With `--schema`, the Oracle `tables` statement now
   also filters on `owner = sys_context('USERENV', 'CURRENT_SCHEMA')`. `tests/integration/oracle/test_ops.py` asserts
   that every listed owner is the schema of the call.
-- Still to run: the VPN-down message must name the host.
+- **Bug, fixed:** with the VPN down, the call failed as `internal` (exit 70) with "the sql connector failed:
+  gaierror: [Errno 8] nodename nor servname provided, or not known". The hosts resolve only through the VPN's DNS,
+  and thin mode lets the failed lookup through as a bare `socket.gaierror`, not an `oracledb.Error`. The driver
+  now maps it to `upstream` with "cannot resolve <host>; check that your VPN is up", and any other bare `OSError`
+  while connecting to "cannot reach <host>:<port>; check that your VPN is up".
 
 **R5, AKS.** The target is a `test` (alias `sol`) cluster in the `borrowed` tier, so it uses the developer's own
 `az` login. `get pods` works in the default namespace and in another listed one. The broker refused, each with an
