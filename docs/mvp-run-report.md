@@ -357,9 +357,10 @@ case fix that first.
 
 ## 9. Post-run checks so far
 
-The developer ran R1 to R5 by hand on 2026-10-23, against the real Bitwarden cloud, a real Snowflake account, the
-CBSLink Oracle databases over the VPN and a real AKS cluster. R1, R2 and R5 pass. R3 passes except for 22b and 22c,
-which stay open. R4 passes after two bug fixes.
+The developer ran R1 to R5, R10 and R11 by hand on 2026-10-23, against the real Bitwarden cloud, a real Snowflake
+account, the CBSLink Oracle databases over the VPN and a real AKS cluster. R1, R2 and R5 pass. R3 passes except for
+22b and 22c, which stay open. R4 passes after two bug fixes. R10 ran on an Oracle corpus and found nothing to fix.
+R11 converted the Oracle skills after one gap in the Python API was closed.
 
 **R1, install.** `install-l0.sh` ran without `--dry-run` for the first time. The R1 row first left out the `mkdir` of
 the policy directory, and `install` does not create a missing parent: it failed with
@@ -441,6 +442,41 @@ The developer's own kubectl works beside modgudr on the same cluster. Findings:
   `--admin` credentials cannot work. The `stage` and `prod` clusters are not checked yet.
 - In zsh a trailing `# comment` on an interactive command line is passed as arguments, unless
   `interactive_comments` is set. kubectl then looked up pods named `#` and so on.
+
+**R10, real-query corpus (Oracle).** The corpus is every statement that the developer's `cbslink-trace` skill ran
+during real read-only traces on sol, captured as executed: `find` by message number, payload id, interchange id,
+buyer reference, buyer, sender and time window, then `show` and `compare`. The f-strings of the skill build IN lists,
+column lists and optional clauses, so capturing at execution gives the texts the broker would see. Identical texts
+are kept once, which leaves 32 statements. `scripts/sql_corpus_report.py --dialect oracle` classifies all 32 as
+`sql:select` (read). The report lists no `unknown` and no missing function; the only functions are `min` and
+`upper`. It lists 8 application tables (`IC_INTEGRATION_MESSAGE`, `XML_REPOSITORY`, `PROCESS_STATUS` and others) as
+"not in the catalogue". That is expected, because the catalogue names only the objects that are `secret` or `admin`.
+The corpus is one skill's queries, so it says nothing about ad-hoc SQL. No Snowflake corpus was run.
+
+**R11, the Oracle skills.** Five scripts now reach Oracle only through modgudr's Python API. Four are the cbslink
+repository's skills (`oracle-diag`, `oracle-list-tables`, `oracle-run-query`, `oracle-view-metadata`, untracked in
+the developer's clone). The fifth is the developer's own `cbslink-trace` skill. None of them holds a credential any
+more. `MODGUDR_ENV`, or `ora@<env>` in `cbslink-trace`, picks the database where `ORACLE_URL` or a password file did
+before. Findings:
+
+- **Gap, fixed:** the Python API had neither `schema` nor the `plan` op, which the CLI has (Q3). Both skills that
+  resolve unqualified names in `CBSLINK_PROD`, and `oracle-diag plan`, needed them. `Sql.query`, `tables`,
+  `describe`, `count` and `sample` now take `schema=`, and `Sql.plan` exists.
+- Old and new output are byte for byte the same for `cbslink-trace`: 13 runs of `find`, `show` and `compare` on sol
+  and prod, `--json` included. The same holds for `oracle-diag`: 10 runs on sol, the timing line aside. The other
+  three were checked by their output only, because running the old versions needs the password in an environment
+  variable.
+- modgudr returns NUMBER as `Decimal` where oracledb returned `int`. `cbslink-trace` turns whole numbers back into
+  `int`, so its `--json` output is unchanged.
+- Q4: `ash-window.sql` now joins `all_users`; `dba_users` is refused as `secret`, with the reason.
+- A call returns at most `maxRowsHard` (50,000) rows, so `oracle-run-query` records a larger result as failed, never
+  with a short count. The policy's timeout (30 s) replaces the scripts' own `--timeout`.
+- The scripts depend on `modgudr-client @ file://…/packages/client`. uv caches that build by version, so after a
+  change to the client a script needs `uv run --reinstall-package modgudr-client` once.
+- `oracle-diag plan` with a `:bind` fails before and after the conversion, because `plan` has no `--param`.
+- The cbslink clone's git-ignored `.claude/settings.local.json` still puts `ORACLE_PASSWORD`, `GH_TOKEN` and
+  `JIRA_AUTH` into every session's environment. Nothing needs the `ORACLE_*` keys now. The password files in
+  `~/.config/cbslink-oracle/` are likewise unused.
 
 **Before R6.** The example Oracle targets were still in `50-targets.yaml`, so `broker.start` listed their hosts in
 `denyHosts`. `agent-setup` would put them into the deny lists it generates. Remove the targets you do not use.
