@@ -336,11 +336,27 @@ class Sql:
         params: Mapping[str, object] | None = None,
         max_rows: int | None = None,
         allow_truncated: bool = False,
+        schema: str | None = None,
         **binds: object,
     ) -> Result:
+        """Run a read-only statement. `schema` (Oracle only) resolves unqualified names in that
+        schema for this call."""
         args: dict[str, Any] = {"sql": sql}
-        self._common(args, params, binds, max_rows)
+        self._common(args, params, binds, max_rows, schema)
         return self._run("query", args, allow_truncated=allow_truncated)
+
+    def plan(
+        self,
+        sql: str,
+        *,
+        params: Mapping[str, object] | None = None,
+        schema: str | None = None,
+        **binds: object,
+    ) -> Result:
+        """Oracle only: the execution plan of a SELECT, one `PLAN_TABLE_OUTPUT` row per line."""
+        args: dict[str, Any] = {"sql": sql}
+        self._common(args, params, binds, None, schema)
+        return self._run("plan", args)
 
     def write(
         self,
@@ -353,20 +369,28 @@ class Sql:
         """Run one DML statement in a transaction. Returns when it ended: `.affected_rows`,
         `.committed` and `.dry_run` are set."""
         args: dict[str, Any] = {"sql": sql}
-        self._common(args, params, binds, None)
+        self._common(args, params, binds, None, None)
         if dry_run:
             args["dryRun"] = True
         return self._run("write", args).wait()
 
     def tables(
-        self, like: str | None = None, *, max_rows: int | None = None, allow_truncated: bool = False
+        self,
+        like: str | None = None,
+        *,
+        max_rows: int | None = None,
+        allow_truncated: bool = False,
+        schema: str | None = None,
     ) -> Result:
+        """Tables and views; with `schema` (Oracle only), those of that schema only."""
         args: dict[str, Any] = {} if like is None else {"like": like}
-        self._common(args, None, {}, max_rows)
+        self._common(args, None, {}, max_rows, schema)
         return self._run("tables", args, allow_truncated=allow_truncated)
 
-    def describe(self, table: str) -> Result:
-        return self._run("describe", {"table": table})
+    def describe(self, table: str, *, schema: str | None = None) -> Result:
+        args: dict[str, Any] = {"table": table}
+        self._common(args, None, {}, None, schema)
+        return self._run("describe", args)
 
     def count(
         self,
@@ -374,12 +398,13 @@ class Sql:
         where: str | None = None,
         *,
         params: Mapping[str, object] | None = None,
+        schema: str | None = None,
         **binds: object,
     ) -> Result:
         args: dict[str, Any] = {"table": table}
         if where is not None:
             args["where"] = where
-        self._common(args, params, binds, None)
+        self._common(args, params, binds, None, schema)
         return self._run("count", args)
 
     def sample(
@@ -389,11 +414,12 @@ class Sql:
         *,
         max_rows: int | None = None,
         allow_truncated: bool = False,
+        schema: str | None = None,
     ) -> Result:
         args: dict[str, Any] = {"table": table}
         if n is not None:
             args["n"] = n
-        self._common(args, None, {}, max_rows)
+        self._common(args, None, {}, max_rows, schema)
         return self._run("sample", args, allow_truncated=allow_truncated)
 
     @staticmethod
@@ -402,12 +428,15 @@ class Sql:
         params: Mapping[str, object] | None,
         binds: Mapping[str, object],
         max_rows: int | None,
+        schema: str | None,
     ) -> None:
         mapped = _merge_binds(params, binds)
         if mapped is not None:
             args["params"] = mapped
         if max_rows is not None:
             args["maxRows"] = max_rows
+        if schema is not None:
+            args["schema"] = schema
 
 
 def connect(
