@@ -14,6 +14,7 @@ import contextlib
 import logging
 import math
 import re
+import socket
 import threading
 from collections.abc import Callable, Generator, Mapping, Sequence
 from decimal import Decimal
@@ -270,6 +271,15 @@ class OracleDriver:
             conn = oracledb.connect(params=params, password=secret)
         except oracledb.Error as exc:
             raise self._login_error(exc) from None
+        except socket.gaierror:
+            # Thin mode lets a failed name lookup through unwrapped; off the VPN, that is the
+            # usual failure for a host only the VPN's DNS knows.
+            raise UpstreamFailure(
+                f"cannot resolve {self._host}; check that your VPN is up"
+            ) from None
+        except OSError:
+            where = f"{self._host}:{self._port}"
+            raise UpstreamFailure(f"cannot reach {where}; check that your VPN is up") from None
         try:
             conn.outputtypehandler = _output_type_handler
             cursor = conn.cursor()

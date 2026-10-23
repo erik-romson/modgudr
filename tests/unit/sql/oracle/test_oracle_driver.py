@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket
 from types import SimpleNamespace
 
 import oracledb
@@ -53,6 +54,31 @@ def test_an_unreachable_host_says_to_check_the_vpn(code: str) -> None:
     result = driver()._login_error(error(oracledb.OperationalError, code))  # pyright: ignore[reportPrivateUsage]
     assert isinstance(result, UpstreamFailure)
     assert str(result) == "cannot reach db.example.net:1522; check that your VPN is up"
+
+
+@pytest.mark.parametrize(
+    ("raised", "message"),
+    [
+        (
+            socket.gaierror(8, "nodename nor servname provided, or not known"),
+            "cannot resolve db.example.net; check that your VPN is up",
+        ),
+        (
+            ConnectionRefusedError(61, "Connection refused"),
+            "cannot reach db.example.net:1522; check that your VPN is up",
+        ),
+    ],
+)
+def test_a_socket_error_the_driver_lets_through_says_to_check_the_vpn(
+    monkeypatch: pytest.MonkeyPatch, raised: OSError, message: str
+) -> None:
+    def connect(**_: object) -> None:
+        raise raised
+
+    monkeypatch.setattr(oracledb, "connect", connect)
+    with pytest.raises(UpstreamFailure) as failure:
+        driver().connect("pw", timeout=5)
+    assert str(failure.value) == message
 
 
 def test_the_listener_not_knowing_the_name_says_service_or_sid() -> None:
