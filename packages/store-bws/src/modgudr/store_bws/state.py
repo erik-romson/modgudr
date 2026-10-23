@@ -1,9 +1,9 @@
 """The `bws` files under `$MODGUDR_HOME/bws` (M2, M19): the generated config and the state guard.
 
-`bws` is told to keep no state (`state_opt_out = true`) and where it would keep it (`state_dir`).
-The cleanup is a guard on top: at start and at lock both state paths are emptied, and symlinks
-are removed, never followed. The second path is where a `bws` version that ignores `state_dir`
-would write, under the `HOME` its children run with.
+`bws` is told to keep no state (`state_opt_out = "true"`, a string: `bws` 2.x refuses a boolean)
+and where it would keep it (`state_dir`). The cleanup is a guard on top: at start and at lock
+both state paths are emptied, and symlinks are removed, never followed. The second path is where
+a `bws` version that ignores `state_dir` would write, under the `HOME` its children run with.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def config_text(home: Path, server_url: str | None) -> str:
     """The `[profiles.default]` profile. Values are JSON strings, which TOML reads as they are."""
     lines = [
         "[profiles.default]",
-        "state_opt_out = true",
+        'state_opt_out = "true"',
         f"state_dir = {json.dumps(str(state_paths(home)[0]))}",
     ]
     if server_url is not None:

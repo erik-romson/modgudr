@@ -135,7 +135,7 @@ def test_the_config_opts_state_out_and_names_the_state_dir(home: Path, fake: Fak
     BwsStore(context(home, fake))
     config = home / "bws" / "config"
     assert config.read_text() == (
-        f'[profiles.default]\nstate_opt_out = true\nstate_dir = "{home / "bws" / "state"}"\n'
+        f'[profiles.default]\nstate_opt_out = "true"\nstate_dir = "{home / "bws" / "state"}"\n'
     )
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
     assert stat.S_IMODE((home / "bws").stat().st_mode) == 0o700
@@ -214,6 +214,19 @@ async def test_unlock_without_bws_is_an_upstream_error(home: Path, fake: FakeBin
     with pytest.raises(StoreError, match="bws not found"):
         await store.unlock(TOKEN)
     assert bws_runs(fake) == []
+
+
+async def test_a_bws_failure_at_unlock_names_the_cause_bws_printed(
+    home: Path, fake: FakeBin
+) -> None:
+    store = BwsStore(context(home, fake))
+    (home / "bws" / "config").write_text("[profiles.default]\nstate_opt_out = true\n")
+    with pytest.raises(StoreError) as raised:
+        await store.unlock(TOKEN)
+    assert str(raised.value) == (
+        "bws could not check the access token: TOML parse error at line 2, column 17"
+    )
+    assert not store.is_unlocked()
 
 
 async def test_an_empty_token_is_refused_without_running_bws(home: Path, fake: FakeBin) -> None:

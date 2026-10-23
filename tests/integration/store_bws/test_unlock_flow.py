@@ -128,7 +128,7 @@ def test_modgudr_unlock_in_a_pty_unlocks_with_the_typed_token(
         config = Path(run["env"]["BWS_CONFIG_FILE"])
         assert config == home / "bws" / "config"
         text = config.read_text()
-        assert "state_opt_out = true" in text
+        assert 'state_opt_out = "true"' in text
         assert f'state_dir = "{home / "bws" / "state"}"' in text
         assert not list((env.home / "bws" / "state").rglob("*"))
     assert TOKEN not in "".join(p.read_text() for p in env.audit_dir.glob("*.jsonl"))

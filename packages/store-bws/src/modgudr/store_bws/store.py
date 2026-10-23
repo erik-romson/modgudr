@@ -21,6 +21,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from collections.abc import Mapping, Sequence
@@ -54,6 +55,8 @@ WARNING = (
     "rare, and L1 closes this exposure"
 )
 
+#: `Error:` and the `0: ` numbering of the cause chain, before the cause itself.
+_ERROR_PREFIX = re.compile(r"^(Error:\s*)?(\d+:\s*)?")
 #: Words in `bws` stderr that mean the access token was refused (revoked, expired, wrong).
 _AUTH_MARKERS = ("access token", "invalid_client", "unauthorized", "401")
 
@@ -130,7 +133,8 @@ class BwsStore:
         except _Failed as exc:
             if exc.auth:
                 raise UnlockRefused("bws refused the access token") from None
-            raise StoreError(f"bws could not check the access token ({_why(exc)})") from None
+            why = _first_line(exc, credential)
+            raise StoreError(f"bws could not check the access token: {why}") from None
         if project not in _project_ids(out):
             raise UnlockRefused(f"the access token cannot see the configured project {project}")
         self._token = credential
@@ -218,16 +222,16 @@ class BwsStore:
         return stdout.decode("utf-8", "replace")
 
 
-def _why(exc: _Failed) -> str:
-    return exc.reason or f"exit {exc.code}"
-
-
 def _first_line(exc: _Failed, token: str) -> str:
-    """The first line of `bws` stderr, with the token removed; the broker scrubs the rest."""
+    """The first line of `bws` stderr, with the token removed; the broker scrubs the rest.
+
+    `bws` 2.x prints `Error:` on a line of its own and the cause below it as `0: <cause>`, so both
+    prefixes are dropped.
+    """
     if exc.reason:
         return exc.reason
     for line in exc.stderr.splitlines():
-        text = line.strip().replace(token, "[redacted]")
+        text = _ERROR_PREFIX.sub("", line.strip().replace(token, "[redacted]"))
         if text:
             return text[:300]
     return f"exit {exc.code}"

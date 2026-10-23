@@ -9,7 +9,8 @@ The scenario comes from `fake-scenario.json` beside this file, under the key "bw
   force_state  true: state is created under both paths regardless of the config's opt-out
   get_format   "object" (default), "array" (one element) or "array2" (two elements)
 Like the real CLI, it reads the config named by BWS_CONFIG_FILE and creates
-`<state_dir, else $HOME/.config/bws/state>/<token id>` unless the config opts state out.
+`<state_dir, else $HOME/.config/bws/state>/<token id>` unless the config opts state out, and
+like bws 2.x it refuses a `state_opt_out` that is not a string.
 Each run appends one JSON line (argv, cwd, the full environment) to `fake-log.jsonl`.
 """
 
@@ -59,7 +60,7 @@ def state_paths(config, force):
     configured = Path(config["state_dir"]) if "state_dir" in config else home_state
     if force:
         return [configured, home_state] if configured != home_state else [configured]
-    if config.get("state_opt_out") is True:
+    if config.get("state_opt_out") == "true":
         return []
     return [configured]
 
@@ -81,7 +82,13 @@ def main():
         return fail("Missing access token. Use --access-token or set BWS_ACCESS_TOKEN")
     if plan.get("revoke") or token != plan.get("token"):
         return fail("Invalid access token: the token is unknown or has been revoked")
-    write_state(profile(), token, bool(plan.get("force_state")))
+    config = profile()
+    if "state_opt_out" in config and not isinstance(config["state_opt_out"], str):
+        # The shape bws 2.x prints: `Error:` alone, then the numbered cause.
+        print("Error: \n   0: TOML parse error at line 2, column 17", file=sys.stderr)
+        print("      invalid type: boolean `true`, expected a string", file=sys.stderr)
+        return 1
+    write_state(config, token, bool(plan.get("force_state")))
     secrets = plan.get("secrets", [])
     if argv == ["project", "list", "--output", "json"]:
         projects = plan.get("projects")
