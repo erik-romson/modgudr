@@ -51,8 +51,9 @@ command line (see [Bitwarden licence](#bitwarden-licence)).
        sh dist/install-l0.sh
 
 2. **Write the policy.** Copy the examples from `dist/policy.d/`, edit hosts, users and the
-   Bitwarden project, and install the company file as root, so that nothing running as you can
-   widen it:
+   Bitwarden project (`store.bws.project`, and `store.bws.serverUrl` when your vault is not the
+   US cloud, for example `https://vault.bitwarden.eu`), and install the company file as root, so
+   that nothing running as you can widen it:
 
        mkdir -p -m 0700 ~/.modgudr ~/.modgudr/policy.d
        sudo install -o root -m 0644 dist/policy.d/00-company.example.yaml ~/.modgudr/policy.d/00-company.yaml

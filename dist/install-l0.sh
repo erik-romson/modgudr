@@ -101,7 +101,9 @@ WARNING: at L0 modgudr runs as your own user. Until agent isolation is configure
          This set-up protects against accidents only.
 
 1. Create the policy directory and install the company file as root, so that nothing running as
-   you can widen it. Edit the example first: it holds example hosts and users only.
+   you can widen it. Edit the example first: it holds example hosts and users only. Set
+   store.bws.project to your Bitwarden project uuid, and store.bws.serverUrl if your vault is
+   not the US cloud (for the EU cloud: https://vault.bitwarden.eu).
 
      mkdir -p -m 0700 "\$HOME/.modgudr" "\$HOME/.modgudr/policy.d"
      sudo install -o root -m 0644 $REPO/dist/policy.d/00-company.example.yaml \\

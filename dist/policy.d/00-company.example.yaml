@@ -16,6 +16,9 @@ store:
   bws:
     # The uuid of the Bitwarden Secrets Manager project whose secrets this store serves.
     project: 3d2f0c1e-6b1a-4f7e-9a53-0b7d2e8c4a11
+    # The Bitwarden server. Leave it out for the US cloud; set it for the EU cloud or a
+    # self-hosted server. https:// only, without user@.
+    # serverUrl: https://vault.bitwarden.eu
 
 defaults:
   env: test             # the environment a call gets when it names none
