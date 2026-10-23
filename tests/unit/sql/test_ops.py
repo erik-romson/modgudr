@@ -56,6 +56,12 @@ def test_template_statements() -> None:
     assert statement_text(call("tables", like="X%"), DIALECT).params[0].value == "X%"
 
 
+def test_oracle_tables_with_a_schema_lists_only_that_schema() -> None:
+    owner = "owner = sys_context('USERENV', 'CURRENT_SCHEMA')"
+    assert owner not in statement_text(call("tables"), OracleDialect()).text
+    assert owner in statement_text(call("tables", schema="APP"), OracleDialect()).text
+
+
 def test_bind_call_strips_the_semicolon_and_numbers_the_binds() -> None:
     params = {"b": {"t": "int", "v": 2}, "a": {"t": "str", "v": "x"}}
     bound = bind_call(

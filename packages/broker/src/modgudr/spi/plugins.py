@@ -317,8 +317,12 @@ class SqlDialect(Protocol):
         """A typed parameter as the driver takes it."""
         ...
 
-    def tables_query(self) -> str:
-        """The `tables` op's statement, with one named bind `:pattern` (a LIKE pattern)."""
+    def tables_query(self, *, in_schema: bool = False) -> str:
+        """The `tables` op's statement, with one named bind `:pattern` (a LIKE pattern).
+
+        `in_schema` is set when the call names `--schema` (M14): the statement then lists only
+        the objects of the session's current schema, which the driver has set to it.
+        """
         ...
 
     def describe_query(self) -> str:

@@ -60,10 +60,12 @@ class OracleDialect:
             )
         return value
 
-    def tables_query(self) -> str:
+    def tables_query(self, *, in_schema: bool = False) -> str:
+        # `--schema` only sets CURRENT_SCHEMA, which all_objects ignores, so filter on it here.
+        owner = "and owner = sys_context('USERENV', 'CURRENT_SCHEMA') " if in_schema else ""
         return (
             "select owner as table_schema, object_name as table_name, object_type as table_type "
-            "from all_objects where object_type in ('TABLE', 'VIEW') "
+            f"from all_objects where object_type in ('TABLE', 'VIEW') {owner}"
             "and upper(object_name) like upper(:pattern) order by owner, object_name"
         )
 

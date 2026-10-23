@@ -58,7 +58,7 @@ class SnowflakeDialect:
             return ("TIMESTAMP_TZ", value)
         return value
 
-    def tables_query(self) -> str:
+    def tables_query(self, *, in_schema: bool = False) -> str:
         return (
             "select table_schema, table_name, table_type from information_schema.tables "
             "where table_schema <> 'INFORMATION_SCHEMA' and table_name ilike :pattern "

@@ -251,6 +251,10 @@ async def test_schema_is_set_for_the_call_and_reset_for_the_next(
     # unqualified names resolve in the schema of the call
     assert rows(await run(env, "count", table="po", schema="APP")) == [["4"]]
     assert error(await run(env, "count", table="po"))["code"] == "upstream"
+    # tables lists the schema of the call only; without it, all_objects spans every owner
+    in_schema = rows(await run(env, "tables", schema="APP"))
+    assert ["APP", "PO", "TABLE"] in in_schema
+    assert {row[0] for row in in_schema} == {"APP"}
     record = next(r for r in read_audit(env.audit_dir) if r.get("type") == "decision")
     assert record["args"] == {"schema": "APP"}
 

@@ -185,7 +185,8 @@ def statement_text(call: Call, dialect: SqlDialect) -> Prepared:
         like = call.args.get("like", "%")
         if not isinstance(like, str):
             raise BadArguments("tables: --like must be a string")
-        return Prepared(dialect.tables_query(), (TypedParam("pattern", "str", like),))
+        query = dialect.tables_query(in_schema=schema_of(call) is not None)
+        return Prepared(query, (TypedParam("pattern", "str", like),))
     table = parse_identifier(_string(call, "table"))
     if op == "describe":
         return Prepared(dialect.describe_query().replace("{table}", table), ())
