@@ -112,7 +112,8 @@ def test_install_script_installs_both_the_broker_and_the_client_command(bare_bin
     installs = [line for line in lines if line.startswith("+ uv tool install")]
     assert len(installs) == 2
     assert f"--from {ROOT}/packages/broker modgudr-broker" in installs[0]
-    assert installs[1] == f"+ uv tool install --from {ROOT}/packages/client modgudr-client"
+    client = f"+ uv tool install --reinstall --from {ROOT}/packages/client modgudr-client"
+    assert installs[1] == client
     alias = lines.index("+ ln -s modgudr /nonexistent/bin/mg")
     assert alias > lines.index(installs[1])
 

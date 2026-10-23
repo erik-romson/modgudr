@@ -56,9 +56,9 @@ teardown() {
     chmod +x "$TEST_ROOT/mgbin/mg"
     PATH="$FAKE_BIN:$TEST_ROOT/mgbin:/usr/bin:/bin" run sh "$INSTALL" --dry-run --prefix "$TEST_ROOT/prefix"
     assert_success
-    assert_output --partial "+ uv tool install --from $PROJECT_DIR/packages/broker modgudr-broker"
+    assert_output --partial "+ uv tool install --reinstall --from $PROJECT_DIR/packages/broker modgudr-broker"
     assert_output --partial "modgudr-sql[snowflake,oracle]"
-    assert_output --partial "+ uv tool install --from $PROJECT_DIR/packages/client modgudr-client"
+    assert_output --partial "+ uv tool install --reinstall --from $PROJECT_DIR/packages/client modgudr-client"
     assert_output --partial "sudo install -o root -m 0644"
     assert_output --partial "modgudr-broker"
     assert_output --partial "modgudr unlock"
@@ -87,7 +87,7 @@ teardown() {
     assert_success
     assert_file_exist "$HOME/fake-uv.log"
     run cat "$HOME/fake-uv.log"
-    assert_output --partial "tool install --from $PROJECT_DIR/packages/broker modgudr-broker --with"
+    assert_output --partial "tool install --reinstall --from $PROJECT_DIR/packages/broker modgudr-broker --with"
     assert_output --partial "modgudr-store-bws"
-    assert_output --partial "tool install --from $PROJECT_DIR/packages/client modgudr-client"
+    assert_output --partial "tool install --reinstall --from $PROJECT_DIR/packages/client modgudr-client"
 }

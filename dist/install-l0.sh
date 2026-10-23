@@ -74,7 +74,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "# UV_TOOL_BIN_DIR=$UV_TOOL_BIN_DIR"
 fi
 
-run uv tool install --from "$REPO/packages/broker" modgudr-broker \
+run uv tool install --reinstall --from "$REPO/packages/broker" modgudr-broker \
     --with "modgudr-client @ file://$REPO/packages/client" \
     --with "modgudr-sql[snowflake,oracle] @ file://$REPO/packages/sql" \
     --with "modgudr-kubectl @ file://$REPO/packages/kubectl" \
@@ -82,7 +82,7 @@ run uv tool install --from "$REPO/packages/broker" modgudr-broker \
 
 # uv links only the executables of the named tool, so `modgudr` needs its own tool install. The
 # client is stdlib-only, so a separate tool environment costs nothing.
-run uv tool install --from "$REPO/packages/client" modgudr-client
+run uv tool install --reinstall --from "$REPO/packages/client" modgudr-client
 
 # The short alias, only when nothing else is called that. It comes after the client install, so
 # that it never dangles.
