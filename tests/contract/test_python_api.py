@@ -92,6 +92,24 @@ def test_sql_wrappers_send_the_documented_arguments(unlocked: BrokerThread) -> N
     assert "2026-10-01" not in audit and "OPEN" not in audit
 
 
+def test_sql_wrappers_send_the_schema_and_plan(unlocked: BrokerThread) -> None:
+    sql = connect(unlocked.env).sql("probe-test")
+    assert dict(sql.query("select 1", schema="APP").fetchall()) == {
+        "sql": "select 1",
+        "schema": "APP",
+    }
+    assert dict(sql.plan("select :a", a=1, schema="APP").fetchall()) == {
+        "sql": "select :a",
+        "param:a": "int:1",
+        "schema": "APP",
+    }
+    assert dict(sql.tables(schema="APP").fetchall()) == {"schema": "APP"}
+    assert dict(sql.describe("PO", schema="APP").fetchall()) == {"table": "PO", "schema": "APP"}
+    assert dict(sql.count("PO", schema="APP").fetchall()) == {"table": "PO", "schema": "APP"}
+    assert dict(sql.sample("PO", schema="APP").fetchall()) == {"table": "PO", "schema": "APP"}
+    assert "schema" not in dict(sql.query("select 1").fetchall())
+
+
 def test_params_is_an_alternative_to_keywords(unlocked: BrokerThread) -> None:
     sql = connect(unlocked.env).sql("probe-test")
     both = dict(sql.query("q", params={"a": 1}, b=2).fetchall())

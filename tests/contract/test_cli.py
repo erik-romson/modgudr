@@ -350,7 +350,7 @@ def test_targets_describe_actions_explain_and_policy(served: BrokerThread) -> No
 
     described = cli(env, "describe", "probe-test")
     assert described.returncode == 0
-    assert "query [<sql>] [-f FILE] [-p name[:type]=value]..." in described.stdout
+    assert "query [<sql>] [--schema <str>] [-f FILE] [-p name[:type]=value]..." in described.stdout
     assert "argv <arguments...>" in described.stdout
 
     actions = cli(env, "actions", "probe")

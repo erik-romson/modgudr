@@ -42,14 +42,23 @@ _RISKS: Mapping[str, Risk] = {
     "describe": Risk.READ,
     "count": Risk.READ,
     "sample": Risk.READ,
+    "plan": Risk.READ,
 }
+
+_SCHEMA = ArgSpec("schema", help="a schema", required=False, flag="--schema")
 
 OPERATIONS = (
     OperationSpec("argv", "echo the arguments as JSON", rows=False, passthrough=True),
     OperationSpec(
         "query",
         "echo the arguments as rows",
-        (ArgSpec("sql", help="the statement", from_file=True),),
+        (ArgSpec("sql", help="the statement", from_file=True), _SCHEMA),
+        params=True,
+    ),
+    OperationSpec(
+        "plan",
+        "echo the arguments as rows",
+        (ArgSpec("sql", help="the statement", from_file=True), _SCHEMA),
         params=True,
     ),
     OperationSpec(
@@ -61,22 +70,29 @@ OPERATIONS = (
         rows=False,
     ),
     OperationSpec(
-        "tables", "list", (ArgSpec("like", help="a pattern", required=False, flag="--like"),)
+        "tables",
+        "list",
+        (ArgSpec("like", help="a pattern", required=False, flag="--like"), _SCHEMA),
     ),
-    OperationSpec("describe", "describe a table", (ArgSpec("table", help="the table"),)),
+    OperationSpec("describe", "describe a table", (ArgSpec("table", help="the table"), _SCHEMA)),
     OperationSpec(
         "count",
         "count rows",
         (
             ArgSpec("table", help="the table"),
             ArgSpec("where", help="a condition", required=False),
+            _SCHEMA,
         ),
         params=True,
     ),
     OperationSpec(
         "sample",
         "sample rows",
-        (ArgSpec("table", help="the table"), ArgSpec("n", "int", "how many", required=False)),
+        (
+            ArgSpec("table", help="the table"),
+            ArgSpec("n", "int", "how many", required=False),
+            _SCHEMA,
+        ),
     ),
 )
 
