@@ -44,7 +44,8 @@ DROPIN_DIR = "managed-settings.d"
 #: Deny hosts every kubectl target brings: the AKS API servers, ARM and the Entra login.
 KUBECTL_DENY_HOSTS = ("*.azmk8s.io", "management.azure.com", "login.microsoftonline.com")
 
-#: The §4.8 credential paths without `MODGUDR_HOME`: (path, is a directory, macOS only).
+#: The §4.8 credential paths without `MODGUDR_HOME`, plus the SSH keys:
+#: (path, is a directory, macOS only).
 _CREDENTIAL_PATHS: tuple[tuple[str, bool, bool], ...] = (
     ("~/.azure", True, False),
     ("~/.kube", True, False),
@@ -53,6 +54,7 @@ _CREDENTIAL_PATHS: tuple[tuple[str, bool, bool], ...] = (
     ("~/.config/gh", True, False),
     ("~/Library/DBeaverData", True, True),
     ("~/.sqldeveloper", True, False),
+    ("~/.ssh", True, False),
 )
 #: The developer's own `bws` config and state (M20).
 BWS_CONFIG = "~/.config/bws"

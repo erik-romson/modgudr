@@ -391,12 +391,14 @@ def test_required_settings_spell_every_key(layout: Layout) -> None:
         "~/.config/gh",
         "~/Library/DBeaverData",
         "~/.sqldeveloper",
+        "~/.ssh",
         "~/.modgudr",
         "~/.config/bws",
     ]
     assert {f["mode"] for f in sandbox["credentials"]["files"]} == {"deny"}
     deny = doc["permissions"]["deny"]
     assert "Read(~/.pgpass)" in deny and "Read(~/.kube/**)" in deny
+    assert "Read(~/.ssh/**)" in deny and "Edit(~/.ssh/**)" in deny
     assert "Read(~/.modgudr/**)" in deny and "Edit(~/.modgudr/**)" in deny
     assert "Edit(.claude/**)" in deny and "Edit(~/.local/share/uv/**)" in deny
     assert "WebFetch(domain:*.azmk8s.io)" in deny

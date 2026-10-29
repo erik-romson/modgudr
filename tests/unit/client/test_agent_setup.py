@@ -138,6 +138,7 @@ def test_the_dropin_has_every_m20_key(world: World) -> None:
         "~/.config/gh",
         "~/Library/DBeaverData",
         "~/.sqldeveloper",
+        "~/.ssh",
         "~/.modgudr",
         "~/.config/bws",
     ):
