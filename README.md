@@ -161,6 +161,93 @@ whatever you add with `--pass-env`) and sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
 allow list prompts you for approval. The `modgudr` command itself is allowed. Expect a prompt for
 anything else the agent runs.
 
+## How a Bash command from Claude Code is checked
+
+With the managed settings installed, every Bash command the agent runs passes the checks below.
+Any one of them can stop it. The hook only steers (it misses `bash -c "kubectl …"`); the sandbox
+and the deny rules are the boundary.
+
+```mermaid
+flowchart TD
+    start(["Claude Code wants to run a Bash command"]) --> hook
+    hook{"PreToolUse hook mg-hook:<br>a blocked tool such as kubectl or az,<br>or curl/wget to a target host?"}
+    hook -- "yes, or the hook cannot start" --> stop(["Blocked, the reason goes back to Claude"])
+    hook -- no --> deny{"permissions.deny matches?<br>for example Bash(kubectl:*)"}
+    deny -- yes --> stop
+    deny -- no --> allow{"permissions.allow matches?<br>Bash(modgudr:*)"}
+    allow -- no --> ask{"You approve the prompt?"}
+    ask -- no --> stop
+    ask -- yes --> sandbox
+    allow -- yes --> sandbox
+
+    subgraph sandbox ["OS sandbox: Seatbelt on macOS, bubblewrap on Linux"]
+        direction TB
+        files["Files: credential paths and MODGUDR_HOME unreadable,<br>writes only to the working directory and the temp directory"]
+        envs["Environment: credential variables removed"]
+        net["Network: only allowedDomains through the proxy,<br>deniedDomains always refused,<br>the only Unix socket is agent.sock"]
+    end
+
+    sandbox -- "anything else fails:<br>Operation not permitted" --> fail(["The command fails"])
+    sandbox -- "a modgudr command" --> sock["agent.sock"]
+    sock --> broker{"Broker: policy,<br>host pin of the secret,<br>limits"}
+    broker -- no --> denied(["denied, exit 2"])
+    broker -- yes --> run["Broker runs the call with the secret,<br>hides secrets in the output,<br>writes the audit record"]
+```
+
+Where each piece is configured:
+
+| What | Where | Owner |
+| --- | --- | --- |
+| Managed settings: sandbox, deny and allow rules, the hook entry | macOS `/Library/Application Support/ClaudeCode/managed-settings.d/50-modgudr.json`, Linux `/etc/claude-code/managed-settings.d/50-modgudr.json` | root |
+| The hook | `/opt/modgudr/bin/mg-hook`, run as `/usr/bin/python3 -I` | root |
+| Your own Claude Code settings | `~/.claude/settings.json`, `.claude/settings.json`, `.claude/settings.local.json`; they cannot override keys the managed file sets | you |
+| Policy | `$MODGUDR_HOME/policy.d/` (default `~/.modgudr/policy.d/`): `00-company.yaml`, `50-targets.yaml` | root, you |
+| `agent.sock` | macOS `~/Library/Caches/modgudr/run/agent.sock`, Linux `$XDG_RUNTIME_DIR/modgudr/agent.sock` | you |
+| `human.sock` | `$MODGUDR_HOME/run/human.sock`, out of the sandbox's reach | you |
+| Audit | `$MODGUDR_HOME/audit/audit-YYYY-MM-DD.jsonl` | you |
+
+`modgudr agent-setup claude` generates the managed settings and the hook. `modgudr doctor` checks
+that they are installed and complete.
+
+### Writing to another folder
+
+The agent can write only to its working directory and the temp directory. To let it write to
+another folder for the current session, type this in Claude Code:
+
+    /add-dir ~/projects/other-repo
+
+The folder opens to both Claude's file tools and the Bash sandbox, for this session only;
+`/permissions` lists it. The managed deny rules still apply inside it. Project settings
+(`.claude/settings.json`, `.claude/settings.local.json`) cannot do this: while the managed settings
+are installed, Claude Code ignores `sandbox.filesystem.allowWrite` from them.
+
+### Reaching the internet: WebFetch and curl
+
+Claude Code reaches the web in two ways, and the managed settings treat them differently:
+
+| | WebFetch tool | `curl`, `wget`, `pip`, … in Bash |
+| --- | --- | --- |
+| Runs in | Claude Code itself | the OS sandbox |
+| Allowed hosts | any public page, except the `WebFetch(domain:…)` deny rules for target hosts | only `sandbox.network.allowedDomains` in the managed file |
+| What the agent gets | the page as markdown, summarised by a small model | the raw response, which a script can save or process |
+
+So the agent can read `https://www.vg.no` with WebFetch, but `curl https://www.vg.no` fails:
+
+    curl: (56) CONNECT tunnel failed, response 403
+
+The managed file sets `allowManagedDomainsOnly` and `strictAllowlist`, so its `allowedDomains` is
+the whole list. Domains in your own settings are ignored, and the agent cannot ask for one more
+host for a single command. To let Bash reach a host, generate the managed settings again with the
+domain added and install the file again:
+
+    modgudr agent-setup claude --force \
+        --allow-domain pypi.org --allow-domain files.pythonhosted.org \
+        --allow-domain registry.npmjs.org --allow-domain www.vg.no
+
+`--allow-domain` replaces the default list, so repeat every domain you want to keep. For a single
+download, type `! curl …` in Claude Code instead: a command that starts with `!` runs outside the
+sandbox.
+
 ## Bitwarden licence
 
 The `bws` store runs the Bitwarden Secrets Manager command line, `bws`, as a subprocess. modgudr
