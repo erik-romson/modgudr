@@ -263,9 +263,30 @@ A few rules keep approval meaningful:
 The developer usually sits at the laptop while the agent works, so Touch ID covers most requests. A
 phone matters when the agent runs for a long time while the developer is away.
 
-A daemon on a laptop cannot reach a phone by itself, so phone approval needs a relay. The relay only
-carries messages, and it never sees a credential or a row of data. It cannot approve anything
-either. The broker checks every signature against a key that the developer enrolled earlier.
+#### The signature carries the security, not the channel
+
+The channel that delivers a request to the phone does not need to be trusted. What matters is the
+answer. The phone signs the exact request with a key that never leaves its secure hardware, and the
+broker checks the signature against a key that the developer enrolled earlier.
+
+The broker builds a request that names the session, the scope, the target, the action, the
+statement and the duration. It hashes the request together with a random value and an expiry time,
+and that hash becomes the challenge the phone signs. The broker accepts an approval only when four
+things hold:
+
+- The signature verifies against the enrolled key.
+- The hash matches the pending request.
+- The approval has not expired.
+- Nobody has used the approval before.
+
+Enrolment happens on `human.sock` with Touch ID. Otherwise the agent could enrol a phone of its own.
+
+#### How the answer gets back to the laptop
+
+The laptop sits behind NAT, so the phone cannot reach it. The broker therefore keeps an outgoing
+connection open to a relay, and the answer comes back through that connection. Nothing ever
+connects in to the laptop. The relay only carries messages. It never sees a credential or a row of
+data, and it cannot approve anything.
 
 ```mermaid
 flowchart LR
@@ -274,11 +295,131 @@ flowchart LR
     end
     relay["Hosted relay"]
     phone["Developer's phone"]
-    broker -->|"1. the request and a hash of the statement"| relay
-    relay -->|"2. a notification"| phone
-    phone -->|"3. the passkey signs the hash"| relay
+    broker -->|"1. the request and its hash,<br/>over a connection the broker opened"| relay
+    relay -->|"2. a push notification"| phone
+    phone -->|"3. Face ID, then the key signs the hash"| relay
     relay -->|"4. the signed approval"| broker
 ```
+
+#### Three ways to approve, from cheapest to best
+
+**1. Touch ID and Apple Watch on the Mac.** This needs no infrastructure. A Secure Enclave key can
+demand Touch ID or a nearby Apple Watch for every signature, so the broker gets a signed grant
+record without any server. It covers the developer at the desk and nearby, and it belongs in the
+free tier. Python cannot reach the Secure Enclave, so this needs a small Swift helper. It fits the
+user-session helper that the pilot already plans.
+
+**2. A web app on the phone, with Web Push and a passkey.** The developer adds a modgudr page to the
+phone's home screen. iOS has supported Web Push for home-screen web apps since iOS 16.4, and Android
+supports it in any browser. A passkey on the phone signs the approval. This needs an HTTPS domain
+for the page and the relay for the answers, which makes it the first paid feature. It needs no App
+Store, and it works on iOS and Android from the first day.
+
+Its weakness is that we serve the page's code. A compromised relay could show `select` on the
+screen while the challenge hashes `drop`. We state that limit openly.
+
+**3. A native app.** It gives the best experience and the strongest integrity. Its code arrives
+signed through the App Store, so the relay cannot change what the phone shows. The request is
+encrypted end to end with a key exchanged at pairing. The relay then sees only ciphertext and never
+reads the SQL text, which may itself contain data. A notification can carry an approve button
+behind Face ID.
+
+#### Why the native app costs the most
+
+Money is not the main cost. Apple charges $99 a year for a developer account, and Google charges $25
+once. The cost is the work that never stops after the first release:
+
+- **Two platforms instead of one.** The web app is one codebase for iOS and Android. A native app
+  needs Swift and Kotlin, or a cross-platform framework that adds a layer between the app and the
+  secure hardware and push features we depend on.
+- **Every release goes through review.** A security fix for the web app ships in minutes. A fix for
+  a native app can take days, and Apple can reject an update.
+- **The app must follow the operating systems.** iOS and Android change every year, and each change
+  can break notifications, background behaviour or key storage.
+- **Open-source users cannot easily build it.** A user cannot sign their own iPhone app, so they
+  must trust our App Store build anyway.
+- **A lost phone means more work.** Keys in a native app live on one device, so we need flows for a
+  new phone, a lost phone and a second phone. Passkeys sync through iCloud Keychain or Google
+  Password Manager, so the operating system handles most of this for the web app.
+
+The relay costs the same for both, so it makes no difference. A minimal native app is small: one
+screen with the request and a Face ID button. Its first version costs little. Keeping two of them
+alive for years is the expense.
+
+#### Channels that may notify but never approve
+
+Telegram, Slack, Teams, SMS and ntfy prove that someone controls a chat account, a phone number or
+a topic name. They do not prove that the developer approved this exact statement. They may say "a
+request is waiting" and link to the signed approval, and nothing more. Teams will ask for Slack
+approval when a second person must approve. The answer stays the same: Slack carries the link, and
+the passkey signs.
+
+A plain "Approve?" button also invites push fatigue. The phone must show the statement, the target
+and the duration, and the broker limits how often the agent may ask. A request that times out stays
+refused.
+
+#### The order
+
+1. **Now:** Touch ID and Apple Watch through a Secure Enclave key, so every approval is signed from
+   the start.
+2. **The first paid feature:** the web app with Web Push, a passkey and a relay that only carries
+   messages.
+3. **When customers ask for it:** a thin native shell around the same page. It adds signed code and
+   better notifications, and it keeps the page and the relay unchanged. End-to-end encryption comes
+   with it.
+
+The grant record and the signature format stay the same through all three steps. The broker only
+gains approvers, and nothing gets rebuilt.
+
+### Approving file changes and commands
+
+The same approval works for more than SQL. The sandbox keeps the agent inside the project
+directory, and Claude Code also keeps the agent away from its own instructions and settings:
+`CLAUDE.md`, `settings.json`, hooks, skills and rules. Both protections are right, but they turn the
+developer into the agent's hands. The agent writes a script, and the developer copies it into a
+terminal and runs it. That habit teaches developers to run whatever the agent hands them, which is
+weaker than an approval that shows the exact change.
+
+So the agent asks the broker instead. It sends the change over `agent.sock`, either as the new
+content of each file or as a script with its full text. The broker shows the developer exactly that,
+the developer approves with Touch ID, and the broker applies the change as the developer, outside
+the sandbox. The broker stores a grant record, as it does for SQL.
+
+```mermaid
+sequenceDiagram
+    participant Agent as Coding agent
+    participant Broker as modgudr broker
+    actor Dev as Developer
+    participant FS as Files outside the sandbox
+    Agent->>Broker: write this content to ~/dotfiles/claude/.claude/rules/java.md
+    Broker->>Dev: show the diff, the path and the session
+    Dev-->>Broker: approve with Touch ID
+    Broker->>Broker: store the grant record
+    Broker->>FS: write the file
+    Broker-->>Agent: written, or the reason for the refusal
+```
+
+The rules for SQL carry over, and a few are specific to files:
+
+- **The approval covers the exact change.** The signed hash covers each path with its old and new
+  content, or the full text of a script. The broker checks the old content right before it writes,
+  so a file that changed after the approval makes the request fail.
+- **One request, one change, no time window.** The broker never grants "write access to a directory
+  for 30 minutes". During such a window the agent could rewrite hooks or instructions that every
+  later session follows, and nobody would see it happen.
+- **File content beats a script.** The broker writes file content itself and knows exactly what it
+  touched. A script can do anything, so the broker shows all of it, runs it with a clean
+  environment, and the approval says that it runs as the developer.
+- **Instructions and settings get the plainest warning.** A change to `CLAUDE.md`, `settings.json`,
+  hooks, skills or rules outlives the session and shapes every later one. The approval says so, and
+  the broker never bundles such a change with others.
+- **A refusal carries its reason**, so the agent explains it to the developer instead of looking
+  for another way through.
+
+Until the broker does this, a small runner outside the repository fills the gap. The agent writes
+each script to a queue, and the developer runs one command that shows the script with its hash and
+runs it only when given that hash. It removes the copying but keeps the developer as the approver,
+without a signature or a grant record.
 
 ## Session scopes
 
@@ -478,7 +619,7 @@ flowchart TD
     s2["2. Onboarding<br/>import .env, scan for secrets, deny rules"]
     s3["3. Credential handouts<br/>exposure levels, the report, the Spring starter"]
     s4["4. Short-lived providers<br/>Snowflake OAuth, Entra ID tokens"]
-    s5["5. Session scopes, approval and grants<br/>one socket per session,<br/>Touch ID first, then the phone relay"]
+    s5["5. Session scopes, approval and grants<br/>one socket per session, SQL and file changes,<br/>Touch ID first, then the phone relay"]
     s6["6. Native protocols for applications<br/>Postgres first, then what the report picks"]
     s1 --> s2 --> s3 --> s4 --> s5 --> s6
 ```
@@ -498,3 +639,7 @@ exposure report from step 3 decides the order inside step 6.
    replace them? A socket per session depends on both answers.
 6. Should a directory that no scope covers get no targets, or a default scope? No targets is fail
    closed, but it adds friction on the first day.
+7. Does iOS deliver Web Push to a home-screen web app reliably enough for approvals? Users report
+   delays and dropped notifications, so we measure it before the web app becomes the paid feature.
+8. Should the broker write the agent's own instructions and settings at all, with the plainest
+   warning, or refuse those paths and leave them to the developer's editor?
