@@ -183,6 +183,8 @@ def test_the_dropin_has_every_m20_key(world: World) -> None:
     assert "Edit(.claude/**)" in deny
     assert "Edit(~/.modgudr/**)" in deny
     assert "Edit(~/Library/LaunchAgents/**)" in deny
+    assert "Edit(~/.gradle/init.d/**)" in deny
+    assert "Edit(~/.m2/settings.xml)" in deny
 
 
 def test_allow_domains_replace_the_defaults(world: World) -> None:
