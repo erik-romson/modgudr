@@ -401,6 +401,9 @@ def test_required_settings_spell_every_key(layout: Layout) -> None:
     assert "Read(~/.ssh/**)" in deny and "Edit(~/.ssh/**)" in deny
     assert "Read(~/.modgudr/**)" in deny and "Edit(~/.modgudr/**)" in deny
     assert "Edit(.claude/**)" in deny and "Edit(~/.local/share/uv/**)" in deny
+    assert "Edit(~/.config/git/**)" in deny and "Edit(~/.gradle/init.d/**)" in deny
+    assert "Edit(~/.gradle/gradle.properties)" in deny and "Edit(~/.m2/settings.xml)" in deny
+    assert "Edit(~/.mavenrc)" in deny
     assert "WebFetch(domain:*.azmk8s.io)" in deny
     # Steering keys are not boundary: not required.
     assert "hooks" not in doc and "allow" not in doc["permissions"]

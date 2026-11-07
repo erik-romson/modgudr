@@ -72,7 +72,8 @@ CREDENTIAL_VARS = (
     "BWS_ACCESS_TOKEN",
 )
 
-#: The §4.8 persistence paths (`Edit(...)` denies) before `MODGUDR_HOME`: (path, macOS only).
+#: The §4.8 persistence paths (`Edit(...)` denies) before `MODGUDR_HOME`, plus the files that
+#: git, Gradle and Maven run or read in every build the developer starts: (path, macOS only).
 _PERSISTENCE_PATHS: tuple[tuple[str, bool], ...] = (
     ("~/.zshrc", False),
     ("~/.zprofile", False),
@@ -88,6 +89,13 @@ _PERSISTENCE_PATHS: tuple[tuple[str, bool], ...] = (
     ("~/.srt-settings.json", False),
     ("~/.ssh/**", False),
     ("~/.gitconfig", False),
+    ("~/.config/git/**", False),
+    ("~/.gradle/init.d/**", False),
+    ("~/.gradle/init.gradle", False),
+    ("~/.gradle/init.gradle.kts", False),
+    ("~/.gradle/gradle.properties", False),
+    ("~/.m2/settings.xml", False),
+    ("~/.mavenrc", False),
 )
 #: The repository's own `.claude/` (a relative rule, kept as written) and the broker's venv.
 REPO_CLAUDE = ".claude/**"
