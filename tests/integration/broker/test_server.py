@@ -613,7 +613,10 @@ async def test_the_call_deadline_ends_with_partial_rows_then_timeout(
 async def test_a_client_that_closes_mid_call_cancels_it(env: BrokerEnv, broker: Broker) -> None:
     await unlock(env)
     reader, writer = await asyncio.open_unix_connection(os.fspath(env.agent_socket))
-    writer.write(line(request("slow", "echo-test", args={"rows": 50, "delayMs": 100})))
+    # A long pause between rows keeps the broker asleep inside the connector while the client
+    # closes: a row written into a closed socket would end the call with `ClientGone` instead of
+    # the cancellation this test asserts the connector sees.
+    writer.write(line(request("slow", "echo-test", args={"rows": 50, "delayMs": 500})))
     await writer.drain()
     rows = 0
     while rows < 2:
