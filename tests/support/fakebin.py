@@ -44,6 +44,11 @@ class FakeBin:
         """`PATH=<bin>:/usr/bin:/bin`: the fakes first, then the system tools and nothing else."""
         return f"{self.bin}:{SYSTEM_PATH}"
 
+    def bare_path(self) -> str:
+        """`PATH=<bin>`: the fakes only. For a test that removes a fake and needs the tool missing,
+        since a runner's /usr/bin can have the real one (GitHub's Ubuntu image has `az`)."""
+        return str(self.bin)
+
     def set_scenario(self, scenario: Mapping[str, Any]) -> None:
         """Write `fake-scenario.json`: one key per fake (`{"claude": {"mode": "all-blocked"}}`)."""
         (self.bin / SCENARIO_FILE).write_text(json.dumps(dict(scenario)), "utf-8")

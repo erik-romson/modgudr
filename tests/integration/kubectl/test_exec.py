@@ -323,7 +323,7 @@ async def test_a_missing_kubectl_shows_in_status_and_fails_upstream(
 ) -> None:
     (fakebin.bin / "kubectl").unlink()
     set_scenario(fakebin)
-    env = kube_env(shortdir, fakebin)
+    env = kube_env(shortdir, fakebin, path=fakebin.bare_path())
     async with running(env):
         status = result_data(await call(env.agent_socket, "status"))
         problems = status["problems"]
@@ -346,7 +346,7 @@ async def test_a_missing_az_shows_in_status_and_fails_at_the_endpoint(
 ) -> None:
     (fakebin.bin / "az").unlink()
     set_scenario(fakebin)
-    env = kube_env(shortdir, fakebin)
+    env = kube_env(shortdir, fakebin, path=fakebin.bare_path())
     async with running(env):
         status = result_data(await call(env.agent_socket, "status"))
         providers = status["providers"]

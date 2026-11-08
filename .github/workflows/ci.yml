@@ -66,6 +66,8 @@ jobs:
         run: uv sync --locked
       - name: Create a kind cluster
         uses: helm/kind-action@v1
+        with:
+          cluster_name: kind
       - name: Prepare a service account and export its token
         run: |
           kubectl create namespace app-test

@@ -41,13 +41,12 @@ from tests.support.brokerfx import (
 )
 
 
-def stale_socket(path: Path) -> int:
+def stale_socket(path: Path) -> None:
     """A socket file nobody listens on: bound, then closed without unlinking."""
     path.parent.mkdir(parents=True, exist_ok=True)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(os.fspath(path))
     sock.close()
-    return os.lstat(path).st_ino
 
 
 # --- directories -------------------------------------------------------------------------------
@@ -159,10 +158,11 @@ async def test_a_broker_with_a_long_socket_path_refuses_and_leaves_nothing(short
 async def test_stale_sockets_are_unlinked_and_rebound(shortdir: Path) -> None:
     env = make_env(shortdir)
     env.home.mkdir(mode=0o700)
-    old = {path: stale_socket(path) for path in (env.agent_socket, env.human_socket)}
+    for path in (env.agent_socket, env.human_socket):
+        stale_socket(path)
+    # Answering on both sockets proves the stale files were replaced. Comparing inode numbers
+    # does not: Linux can give the new socket the inode the unlinked one had.
     async with running(env):
-        for path, inode in old.items():
-            assert os.lstat(path).st_ino != inode
         assert result_data(await call(env.agent_socket, "status"))["channel"] == "agent"
         assert result_data(await call(env.human_socket, "status"))["channel"] == "human"
 
