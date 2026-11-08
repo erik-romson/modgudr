@@ -3,6 +3,8 @@ import os
 import pytest
 
 from tests.support.fakebin import fakebin as fakebin
+from tests.support.sandbox import pytest_report_header as pytest_report_header
+from tests.support.sandbox import pytest_runtest_makereport as pytest_runtest_makereport
 from tests.support.shortdir import shortdir as shortdir
 
 _OPT_IN = {

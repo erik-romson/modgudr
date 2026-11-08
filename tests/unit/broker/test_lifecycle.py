@@ -39,6 +39,7 @@ from tests.support.brokerfx import (
     unlock,
     wait_for,
 )
+from tests.support.sandbox import BIND_BLOCKED, REASON
 
 
 def stale_socket(path: Path) -> None:
@@ -193,6 +194,7 @@ async def test_a_live_agent_socket_of_another_home_refuses_start(shortdir: Path)
         assert result_data(await call(env.agent_socket, "status"))["state"] == "locked"
 
 
+@pytest.mark.skipif(BIND_BLOCKED, reason=REASON)
 async def test_a_failure_after_the_first_bind_leaves_no_socket(shortdir: Path) -> None:
     env = make_env(shortdir)
     env.human_socket.parent.mkdir(parents=True, mode=0o700)
@@ -312,6 +314,7 @@ async def test_broker_start_and_stop_records(shortdir: Path) -> None:
 # --- SIGTERM -----------------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(BIND_BLOCKED, reason=REASON)
 async def test_sigterm_drains_in_flight_calls(shortdir: Path) -> None:
     env = make_env(shortdir)
     ready: asyncio.Future[Broker] = asyncio.get_running_loop().create_future()

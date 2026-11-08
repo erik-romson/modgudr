@@ -3,7 +3,8 @@ a driver spy and an unlocked in-process broker (dev mode, `file` store).
 
 The first thing a session does is the stop condition of step 16: Docker answers and the image is
 present. When not, every test errors with "Docker or the Oracle Free image is not available (see
-Before running B3)". The tests never skip and never pull another image.
+Before running B3)". The tests fail when Docker is missing, except in the agent sandbox, where
+they are reported as skipped, and they never pull another image.
 """
 
 from __future__ import annotations
