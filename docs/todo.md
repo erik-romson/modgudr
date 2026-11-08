@@ -16,10 +16,7 @@ add `github.com`, `api.github.com`, `codeload.github.com`, `objects.githubuserco
 
 ## The uv cache inside the sandbox
 
-The sandbox cannot write to `~/.cache/uv`, so `uv run` fails with "Operation not permitted". Setting
-`UV_CACHE_DIR` to a directory under `$TMPDIR` works around it.
-
-We should not let the sandbox write to `~/.cache/uv`. The developer runs uv from that cache outside
-the sandbox, so an agent that could write there could plant code that the developer later runs.
-Instead, `modgudr agent run claude` should set `UV_CACHE_DIR` to a cache that only the agent uses,
-and `modgudr doctor --agent claude` should report when that variable is missing.
+The sandbox cannot write to `~/.cache/uv`, and it must not: the developer runs uv from that cache
+outside the sandbox, so an agent that could write there could plant code that the developer later
+runs. `modgudr agent run claude` now sets `UV_CACHE_DIR` to a cache that only agents use. What is
+left is that `modgudr doctor --agent claude` should report when that variable is missing.

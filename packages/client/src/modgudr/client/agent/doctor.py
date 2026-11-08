@@ -43,6 +43,7 @@ from modgudr.client.agent.isolation import (
     settings_locations,
 )
 from modgudr.client.agent.run import (
+    agent_tmp_dir,
     build_environment,
     fetch_meta,
     make_azure_dir,
@@ -561,7 +562,12 @@ def run_agent_doctor(
         (workdir / "probe.py").write_text(script.read_text("utf-8"), "utf-8")
         (workdir / probe.INPUT_FILE).write_text(json.dumps(spec, indent=2) + "\n", "utf-8")
         child = build_environment(
-            parent, session=new_session(), env=None, pass_env=[], azure_dir=azure_dir
+            parent,
+            session=new_session(),
+            env=None,
+            pass_env=[],
+            azure_dir=azure_dir,
+            agent_tmp=agent_tmp_dir(),
         )
         print(
             "modgudr doctor --agent claude: this starts Claude Code and spends API tokens "

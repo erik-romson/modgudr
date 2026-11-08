@@ -18,6 +18,7 @@ from modgudr.client.agent.isolation import L0_WARNING
 from modgudr.client.agent.run import (
     ALLOWED_NAMES,
     SCRUB_VARIABLE,
+    agent_tmp_dir,
     build_environment,
     check_pass_env,
     run_claude,
@@ -115,8 +116,12 @@ def test_the_child_environment_is_the_allowlist(
             "MODGUDR_ENV",
             "KUBECONFIG",
             "AZURE_CONFIG_DIR",
+            "UV_CACHE_DIR",
+            "npm_config_cache",
             SCRUB_VARIABLE,
         }
+        assert env["UV_CACHE_DIR"] == f"{agent_tmp_dir()}/uv-cache"
+        assert env["npm_config_cache"] == f"{agent_tmp_dir()}/npm-cache"
         assert env["MODGUDR_ENV"] == "stage"
         assert env["KUBECONFIG"] == "/dev/null"
         assert env[SCRUB_VARIABLE] == "1"
@@ -254,5 +259,35 @@ def test_the_allowlist_has_no_credential_names() -> None:
         env=None,
         pass_env=(),
         azure_dir="/tmp/mg-azure-x",
+        agent_tmp="/tmp/claude-1",
     )
     assert env["AZURE_CONFIG_DIR"] == "/tmp/mg-azure-x"
+
+
+def test_the_caches_are_the_fixed_agent_only_paths(fakebin: FakeBin, shortdir: Path) -> None:
+    base = agent_tmp_dir()
+    parent = {**parent_env(fakebin, shortdir), "UV_CACHE_DIR": "/x"}
+    first = run(fakebin, shortdir, parent=parent)
+    second = run(fakebin, shortdir, parent=parent, pass_env=("UV_CACHE_DIR",))
+    try:
+        for runner in (first, second):
+            assert runner.env["UV_CACHE_DIR"] == f"{base}/uv-cache"
+            assert runner.env["npm_config_cache"] == f"{base}/npm-cache"
+    finally:
+        discard(first)
+        discard(second)
+
+
+def test_the_upper_case_npm_cache_name_is_dropped(fakebin: FakeBin, shortdir: Path) -> None:
+    parent = {**parent_env(fakebin, shortdir), "NPM_CONFIG_CACHE": "/x"}
+    runner = run(fakebin, shortdir, parent=parent)
+    try:
+        assert "NPM_CONFIG_CACHE" not in runner.env
+        assert runner.env["npm_config_cache"] == f"{agent_tmp_dir()}/npm-cache"
+    finally:
+        discard(runner)
+
+
+def test_the_agent_tmp_dir_is_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("os.getuid", lambda: 501)
+    assert agent_tmp_dir() == "/tmp/claude-501"
