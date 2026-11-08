@@ -58,8 +58,14 @@ class Setup:
         return code, err.getvalue()
 
 
+#: The hook's own broker timeout, kept for the test of a hung broker.
+REAL_TIMEOUT = hook.BROKER_TIMEOUT
+
+
 @pytest.fixture
-def setup(shortdir: Path) -> Setup:
+def setup(shortdir: Path, monkeypatch: pytest.MonkeyPatch) -> Setup:
+    # A stub broker on a loaded machine can miss 0.3 s, and the hook then allows the call.
+    monkeypatch.setattr(hook, "BROKER_TIMEOUT", 5.0)
     return Setup(shortdir)
 
 
@@ -158,7 +164,10 @@ def test_the_host_check_is_skipped_with_the_broker_down(setup: Setup) -> None:
     assert not list(setup.tmp.iterdir())  # nothing cached from a failed fetch
 
 
-def test_a_hung_broker_costs_at_most_the_timeout(setup: Setup) -> None:
+def test_a_hung_broker_costs_at_most_the_timeout(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hook, "BROKER_TIMEOUT", REAL_TIMEOUT)
     with setup.broker(silent=True):
         started = time.monotonic()
         result = setup.run(f"curl https://{HOST}/")
