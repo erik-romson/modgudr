@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,7 @@ from typing import Any
 import pytest
 
 from modgudr.client import cli
-from modgudr.client.agent import hook
+from modgudr.client.agent import hook, setup
 from modgudr.client.agent.isolation import KUBECTL_DENY_HOSTS, Facts, Isolation, detect
 from modgudr.client.agent.setup import (
     DEFAULT_ALLOWED_DOMAINS,
@@ -84,11 +86,19 @@ class World:
     def broker(self) -> StubBroker:
         return StubBroker(Path(self.facts.agent_socket), self.answers())
 
-    def run(self, *allow: str, force: bool = False, uid: int = 1000, **env: str) -> str:
+    def run(
+        self,
+        *allow: str,
+        force: bool = False,
+        uid: int = 1000,
+        remove: Sequence[str] = (),
+        **env: str,
+    ) -> str:
         return run_setup(
             self.out,
             allow,
             force=force,
+            remove_domains=remove,
             platform=self.platform,
             uid=uid,
             user_home=self.user_home,
@@ -187,7 +197,7 @@ def test_the_dropin_has_every_m20_key(world: World) -> None:
     assert "Edit(~/.m2/**)" in deny
 
 
-def test_allow_domains_replace_the_defaults(world: World) -> None:
+def test_allow_domains_without_an_installed_dropin_replace_the_defaults(world: World) -> None:
     doc = generate(world, "pypi.org", "*.example.net")
     assert doc["sandbox"]["network"]["allowedDomains"] == ["pypi.org", "*.example.net"]
 
@@ -432,3 +442,236 @@ def test_the_cli_exits_6_when_the_broker_is_down(
 def test_the_cli_needs_an_agent(world: World) -> None:
     assert cli.main(["agent-setup"]) == 64
     assert cli.main(["agent-setup", "codex"]) == 64
+
+
+# --- the installed domains -----------------------------------------------------------------------
+
+Install = Callable[[object], Path]
+
+
+def point_at(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    def installed_dropin(platform: str) -> Path:
+        return path
+
+    monkeypatch.setattr(setup, "installed_dropin", installed_dropin)
+
+
+def dropin_with(allowed: object) -> dict[str, Any]:
+    return {MARKER_KEY: "old", "sandbox": {"network": {"allowedDomains": allowed}}}
+
+
+@pytest.fixture
+def install(world: World, monkeypatch: pytest.MonkeyPatch) -> Install:
+    """Writes the installed drop-in (a JSON value, or text) and points `installed_dropin` at it."""
+    path = world.root / "installed.json"
+
+    def write(document: object) -> Path:
+        path.write_text(document if isinstance(document, str) else json.dumps(document))
+        point_at(monkeypatch, path)
+        return path
+
+    return write
+
+
+def allowed(w: World) -> list[str]:
+    return w.settings()["sandbox"]["network"]["allowedDomains"]
+
+
+def run_with(w: World, *allow: str, remove: Sequence[str] = (), force: bool = False) -> str:
+    with w.broker():
+        return w.run(*allow, remove=remove, force=force)
+
+
+def refused(w: World, *allow: str, remove: Sequence[str] = (), match: str) -> None:
+    with w.broker(), pytest.raises(UsageError, match=match):
+        w.run(*allow, remove=remove)
+    assert not w.out.exists()
+
+
+def test_nothing_installed_gives_the_defaults(world: World) -> None:
+    text = run_with(world)
+    assert allowed(world) == list(DEFAULT_ALLOWED_DOMAINS)
+    assert "no drop-in installed" in text
+    assert "added:" not in text
+
+
+def test_nothing_installed_with_an_allow_domain_gives_only_that(world: World) -> None:
+    run_with(world, "Example.NET")
+    assert allowed(world) == ["example.net"]
+
+
+def test_nothing_installed_cannot_remove(world: World) -> None:
+    refused(world, remove=["a.org"], match="nothing to remove from")
+
+
+def test_a_reinstall_with_no_flags_changes_nothing(world: World, install: Install) -> None:
+    install(dropin_with(["B.org", "a.org"]))
+    text = run_with(world)
+    assert allowed(world) == ["B.org", "a.org"]
+    assert "added: none" in text and "removed: none" in text
+    assert "no drop-in installed" not in text
+
+
+def test_additions_follow_the_installed_order_and_are_stable(
+    world: World, install: Install
+) -> None:
+    install(dropin_with(["b.org", "a.org"]))
+    run_with(world, "c.org")
+    assert allowed(world) == ["b.org", "a.org", "c.org"]
+    # The installed file is unchanged, so the second run still adds c.org to it.
+    text = run_with(world, "c.org", force=True)
+    assert allowed(world) == ["b.org", "a.org", "c.org"]
+    assert "added: c.org" in text
+
+
+def test_a_removal(world: World, install: Install) -> None:
+    install(dropin_with(["a.org", "b.org"]))
+    text = run_with(world, remove=["a.org"])
+    assert allowed(world) == ["b.org"]
+    assert "removed: a.org" in text and "added: none" in text
+
+
+def test_an_allow_and_a_remove_together(world: World, install: Install) -> None:
+    install(dropin_with(["a.org", "b.org"]))
+    text = run_with(world, "c.org", remove=["a.org"])
+    assert allowed(world) == ["b.org", "c.org"]
+    assert "added: c.org" in text and "removed: a.org" in text
+
+
+def test_removing_a_domain_that_is_not_installed_is_refused(world: World, install: Install) -> None:
+    install(dropin_with(["a.org", "b.org"]))
+    with world.broker(), pytest.raises(UsageError) as caught:
+        world.run(remove=["z.org"])
+    message = str(caught.value)
+    assert "a.org, b.org" in message and "Only 50-modgudr.json" in message
+    assert not world.out.exists()
+
+
+def test_removing_the_last_domain_leaves_none(world: World, install: Install) -> None:
+    install(dropin_with(["a.org"]))
+    text = run_with(world, remove=["a.org"])
+    assert allowed(world) == []
+    assert "allowed domains: none" in text
+
+
+def test_an_empty_installed_list_stays_empty(world: World, install: Install) -> None:
+    install(dropin_with([]))
+    run_with(world)
+    assert allowed(world) == []
+
+
+def test_domains_compare_case_insensitively(world: World, install: Install) -> None:
+    install(dropin_with(["pypi.org"]))
+    text = run_with(world, "Pypi.org")
+    assert allowed(world) == ["pypi.org"]
+    assert "added: none" in text
+    run_with(world, remove=["PYPI.ORG"], force=True)
+    assert allowed(world) == []
+
+
+def test_allow_and_remove_of_the_same_domain_is_refused_before_reading(
+    world: World, install: Install
+) -> None:
+    install("not json")
+    refused(world, "x.org", remove=["X.org"], match="'x.org'")
+
+
+def test_a_wildcard_and_its_apex_are_different_entries(world: World, install: Install) -> None:
+    install(dropin_with(["example.net"]))
+    refused(world, remove=["*.example.net"], match="not in the installed drop-in")
+    run_with(world, "*.example.net")
+    assert allowed(world) == ["example.net", "*.example.net"]
+
+
+def test_a_malformed_installed_entry_is_refused_but_can_be_removed(
+    world: World, install: Install
+) -> None:
+    install(dropin_with(["pypi.org", "https://x.com"]))
+    refused(world, match="https://x.com")
+    run_with(world, remove=["https://x.com"])
+    assert allowed(world) == ["pypi.org"]
+
+
+def test_an_absent_file_or_parent_gives_the_defaults(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    point_at(monkeypatch, world.root / "none.json")
+    run_with(world)
+    assert allowed(world) == list(DEFAULT_ALLOWED_DOMAINS)
+    point_at(monkeypatch, world.root / "no" / "x.json")
+    run_with(world, force=True)
+    assert allowed(world) == list(DEFAULT_ALLOWED_DOMAINS)
+
+
+def test_a_directory_at_the_path_is_refused(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = world.root / "installed.json"
+    path.mkdir()
+    point_at(monkeypatch, path)
+    refused(world, match=str(path))
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root reads a mode 000 file")
+def test_an_unreadable_file_is_refused(world: World, install: Install) -> None:
+    path = install(dropin_with(["a.org"]))
+    path.chmod(0)
+    try:
+        refused(world, match=str(path))
+    finally:
+        path.chmod(0o600)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "not json",
+        "[]",
+        {"sandbox": {"network": {"allowedDomains": ["a.org"]}}},
+        dropin_with("a.org"),
+        dropin_with(["a.org", 5]),
+        {MARKER_KEY: "old", "sandbox": {"network": {}}},
+        {MARKER_KEY: "old"},
+    ],
+)
+def test_an_unusable_installed_file_is_refused(
+    world: World, install: Install, document: object
+) -> None:
+    path = install(document)
+    refused(world, match=str(path))
+
+
+def test_an_unparseable_file_is_exit_64_even_with_the_broker_down(
+    world: World, install: Install, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install("not json")
+    assert cli.main(["agent-setup", "claude", "--out", str(world.out)]) == 64
+    assert "not JSON" in capsys.readouterr().err
+    assert not world.out.exists()
+
+
+def test_the_cli_removes_a_domain(
+    world: World, install: Install, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install(dropin_with(["a.org", "b.org"]))
+    with world.broker():
+        code = cli.main(
+            ["agent-setup", "claude", "--out", str(world.out), "--remove-domain", "a.org"]
+        )
+    assert code == 0
+    assert "removed: a.org" in capsys.readouterr().out
+    assert allowed(world) == ["b.org"]
+    with world.broker():
+        args = ["agent-setup", "claude", "--out", str(world.out), "--remove-domain", "z.org"]
+        assert cli.main([*args, "--force"]) == 64
+    assert "not in the installed drop-in" in capsys.readouterr().err
+
+
+def test_the_installed_dropin_is_never_under_the_system_path_in_tests(
+    world: World, install: Install
+) -> None:
+    assert not str(setup.installed_dropin("darwin")).startswith("/Library")
+    install(dropin_with([]))
+    assert not str(setup.installed_dropin("darwin")).startswith("/Library")
+
+
+def test_the_real_installed_path_is_the_install_target() -> None:
+    assert setup.install_target("darwin").endswith(f"{DROPIN_DIR}/{DROPIN_FILE}")

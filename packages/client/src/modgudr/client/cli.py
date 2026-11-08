@@ -611,13 +611,20 @@ def cmd_agent_setup(argv: Sequence[str]) -> int:
         action="append",
         default=[],
         metavar="D",
-        help="a domain the sandbox may reach (repeatable; default pypi.org, "
-        "files.pythonhosted.org, registry.npmjs.org)",
+        help="a domain to add to the installed list (repeatable; with no drop-in installed, "
+        "the list starts as pypi.org, files.pythonhosted.org, registry.npmjs.org)",
+    )
+    claude.add_argument(
+        "--remove-domain",
+        action="append",
+        default=[],
+        metavar="D",
+        help="a domain to take out of the installed list (repeatable)",
     )
     claude.add_argument("--force", action="store_true", help="overwrite an earlier output")
     ns = parser.parse_args(list(argv))
     out = Path(ns.out)
-    instructions = run_setup(out, ns.allow_domain, force=ns.force)
+    instructions = run_setup(out, ns.allow_domain, force=ns.force, remove_domains=ns.remove_domain)
     _note(f"wrote {out.absolute()}: {DROPIN_DIR}/{DROPIN_FILE}, {HOOK_FILE}, {INSTALL_FILE}")
     sys.stdout.write(instructions)
     sys.stdout.flush()
