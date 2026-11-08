@@ -209,6 +209,10 @@ Where each piece is configured:
 `modgudr agent-setup claude` generates the managed settings and the hook. `modgudr doctor` checks
 that they are installed and complete.
 
+`agent-setup` and `doctor` use the code of the checkout they are installed from, and the broker uses the
+code it started with. After a change to the required settings, generate and install the drop-in, then
+restart the broker.
+
 ### Writing to another folder
 
 The agent can write only to its working directory and the temp directory. To let it write to
@@ -220,6 +224,11 @@ The folder opens to both Claude's file tools and the Bash sandbox, for this sess
 `/permissions` lists it. The managed deny rules still apply inside it. Project settings
 (`.claude/settings.json`, `.claude/settings.local.json`) cannot do this: while the managed settings
 are installed, Claude Code ignores `sandbox.filesystem.allowWrite` from them.
+
+The managed settings also set `permissions.blockWritesOutsideWorkingDirectories` (Claude Code
+2.1.314 or later). It makes the file tools refuse paths outside the working directories in every
+permission mode, and `/add-dir` adds a working directory. The key also refuses Claude Code's
+settings files inside the working directories, and it removes `EnterWorktree` and `ExitWorktree`.
 
 ### Reaching the internet: WebFetch and curl
 
@@ -245,6 +254,9 @@ domain added and install the file again:
 `--allow-domain` adds to the list in the installed drop-in, and `--remove-domain` takes one away.
 With no drop-in installed, the list starts from the defaults. For a single download, type
 `! curl …` in Claude Code instead: a command that starts with `!` runs outside the sandbox.
+
+`~/.git-credentials` and `~/.ssh` are denied, so git to a private repository fails in the sandbox.
+Run it with `!`.
 
 ## Bitwarden licence
 

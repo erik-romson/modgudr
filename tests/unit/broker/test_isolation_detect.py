@@ -293,6 +293,11 @@ def _mutations() -> list[tuple[str, Mutation, str]]:
     out.append(
         (f"{name}-weakened", _set("enable", "permissions", "disableBypassPermissionsMode"), name)
     )
+    name = "permissions.blockWritesOutsideWorkingDirectories"
+    key = "blockWritesOutsideWorkingDirectories"
+    out.append((f"{name}-deleted", _delete("permissions", key), name))
+    out.append((f"{name}-false", _set(False, "permissions", key), name))
+    out.append((f"{name}-string", _set("true", "permissions", key), name))
     return out
 
 
@@ -382,6 +387,7 @@ def test_required_settings_spell_every_key(layout: Layout) -> None:
     assert sandbox["network"]["allowAllUnixSockets"] is False
     assert sorted(sandbox["network"]["deniedDomains"]) == sorted(HOSTS)
     assert doc["permissions"]["disableBypassPermissionsMode"] == "disable"
+    assert doc["permissions"]["blockWritesOutsideWorkingDirectories"] is True
     files = [f["path"] for f in sandbox["credentials"]["files"]]
     assert files == [
         "~/.azure",
@@ -392,6 +398,8 @@ def test_required_settings_spell_every_key(layout: Layout) -> None:
         "~/Library/DBeaverData",
         "~/.sqldeveloper",
         "~/.ssh",
+        "~/.docker/config.json",
+        "~/.git-credentials",
         "~/.modgudr",
         "~/.config/bws",
     ]
@@ -407,6 +415,63 @@ def test_required_settings_spell_every_key(layout: Layout) -> None:
     # Steering keys are not boundary: not required.
     assert "hooks" not in doc and "allow" not in doc["permissions"]
     assert not [r for r in deny if r.startswith("Bash(")]
+
+
+# --- how a deny rule must be rooted to cover a path ----------------------------------------------
+
+
+def _swap_rule(old: str, new: str) -> Mutation:
+    def mutate(doc: Doc) -> None:
+        deny = doc["permissions"]["deny"]
+        assert old in deny, old
+        doc["permissions"]["deny"] = [new if r == old else r for r in deny]
+
+    return mutate
+
+
+def test_a_directory_rule_covers_a_credential_file_inside_it(layout: Layout) -> None:
+    doc = layout.required()
+    _swap_rule("Read(~/.docker/config.json)", "Read(~/.docker/**)")(doc)
+    layout.write("50-modgudr.json", doc)
+    result = layout.detect()
+    assert (result.label, result.reasons) == ("managed-settings", ())
+
+
+def test_a_recursive_rule_rooted_at_a_credential_file_does_not_cover_it(layout: Layout) -> None:
+    doc = layout.required()
+    _swap_rule("Read(~/.docker/config.json)", "Read(~/.docker/config.json/**)")(doc)
+    layout.write("50-modgudr.json", doc)
+    result = layout.detect()
+    assert result.label == "none"
+    assert result.reasons == (
+        "permissions.deny must hold a Read(...) rule covering ~/.docker/config.json",
+    )
+
+
+def test_a_recursive_rule_rooted_at_a_persistence_file_does_not_cover_it(layout: Layout) -> None:
+    doc = layout.required()
+    _swap_rule("Edit(~/.mavenrc)", "Edit(~/.mavenrc/**)")(doc)
+    layout.write("50-modgudr.json", doc)
+    result = layout.detect()
+    assert result.label == "none"
+    assert result.reasons == ("permissions.deny must hold an Edit(...) rule covering ~/.mavenrc",)
+
+
+def test_the_generated_rule_for_a_credential_directory_covers_it(layout: Layout) -> None:
+    doc = layout.required()
+    assert "Read(~/.kube/**)" in doc["permissions"]["deny"]
+    layout.write("50-modgudr.json", doc)
+    assert layout.detect().label == "managed-settings"
+
+
+def test_a_deny_rule_without_its_credential_entry_gives_one_reason(layout: Layout) -> None:
+    doc = layout.required()
+    assert "Read(~/.docker/config.json)" in doc["permissions"]["deny"]
+    _drop_file("~/.docker/config.json")(doc)
+    layout.write("50-modgudr.json", doc)
+    result = layout.detect()
+    assert result.label == "none"
+    assert result.reasons == ("sandbox.credentials.files must deny ~/.docker/config.json",)
 
 
 # --- a non-default MODGUDR_HOME ----------------------------------------------------------------

@@ -44,8 +44,8 @@ DROPIN_DIR = "managed-settings.d"
 #: Deny hosts every kubectl target brings: the AKS API servers, ARM and the Entra login.
 KUBECTL_DENY_HOSTS = ("*.azmk8s.io", "management.azure.com", "login.microsoftonline.com")
 
-#: The §4.8 credential paths without `MODGUDR_HOME`, plus the SSH keys:
-#: (path, is a directory, macOS only).
+#: The §4.8 credential paths without `MODGUDR_HOME`, plus the SSH keys, the Docker client config
+#: and the git credential store: (path, is a directory, macOS only).
 _CREDENTIAL_PATHS: tuple[tuple[str, bool, bool], ...] = (
     ("~/.azure", True, False),
     ("~/.kube", True, False),
@@ -55,6 +55,8 @@ _CREDENTIAL_PATHS: tuple[tuple[str, bool, bool], ...] = (
     ("~/Library/DBeaverData", True, True),
     ("~/.sqldeveloper", True, False),
     ("~/.ssh", True, False),
+    ("~/.docker/config.json", False, False),
+    ("~/.git-credentials", False, False),
 )
 #: The developer's own `bws` config and state (M20).
 BWS_CONFIG = "~/.config/bws"
@@ -294,7 +296,11 @@ def required_settings(facts: Facts, *, user_home: str) -> dict[str, object]:
     deny = [_read_rule(path, is_dir) for path, is_dir in creds]
     deny += [_edit_rule(path) for path in persistence_paths(facts, user_home)]
     deny += [_webfetch_rule(host) for host in facts.deny_hosts]
-    permissions: dict[str, object] = {"disableBypassPermissionsMode": "disable", "deny": deny}
+    permissions: dict[str, object] = {
+        "disableBypassPermissionsMode": "disable",
+        "blockWritesOutsideWorkingDirectories": True,
+        "deny": deny,
+    }
     return {"sandbox": sandbox, "permissions": permissions}
 
 
@@ -548,7 +554,10 @@ def _rule_covers(rules: Sequence[_Rule], tool: str, path: str, user_home: str) -
     for rule in rules:
         if rule.tool != tool or rule.relative:
             continue
-        if rule.recursive and _covers(rule.path, wanted):
+        # A recursive rule rooted at the wanted path matches only things under a directory of that
+        # name, so it does not cover a file.
+        recursive_covers = wanted_recursive or rule.path != wanted
+        if rule.recursive and recursive_covers and _covers(rule.path, wanted):
             return True
         if not rule.recursive and not wanted_recursive and rule.path == wanted:
             return True
@@ -656,6 +665,8 @@ def check_settings(settings: Mapping[str, object], facts: Facts, *, user_home: s
     # Network.
     must_be("sandbox.network.allowManagedDomainsOnly", True)
     must_be("sandbox.network.strictAllowlist", True)
+    # On macOS, `true` lets sandboxed commands listen on ports and connect to any localhost port,
+    # including unauthenticated local services that would then act outside the sandbox.
     must_be("sandbox.network.allowLocalBinding", False)
     denied_domains = {d.lower() for d in _strings(settings, "sandbox.network.deniedDomains")}
     deny_rules = set(_strings(settings, "permissions.deny"))
@@ -693,4 +704,5 @@ def check_settings(settings: Mapping[str, object], facts: Facts, *, user_home: s
         reasons.append(
             f'permissions.disableBypassPermissionsMode must be "disable" (found {_found(mode)})'
         )
+    must_be("permissions.blockWritesOutsideWorkingDirectories", True)
     return reasons

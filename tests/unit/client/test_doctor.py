@@ -145,6 +145,66 @@ def test_a_matching_dropin_is_ok(world: World) -> None:
     assert run_doctor(world.context(), status_fn=world.status, out=io.StringIO()) == 0
 
 
+FILE_CREDENTIALS = ["~/.docker/config.json", "~/.git-credentials"]
+
+
+def _create_credential_file(world: World, written: str) -> None:
+    path = world.user / written.removeprefix("~/")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("secret")
+
+
+@pytest.mark.parametrize("written", FILE_CREDENTIALS)
+def test_an_absent_credential_file_gives_no_line(world: World, written: str) -> None:
+    world.install()
+    lines, _ = collect_lines(world.context(), world.status())
+    assert not [line for line in lines if written in line.text]
+    assert not texts(lines, FAIL), texts(lines, FAIL)
+
+
+@pytest.mark.parametrize("written", FILE_CREDENTIALS)
+def test_a_present_credential_file_that_the_dropin_denies_is_ok(world: World, written: str) -> None:
+    _create_credential_file(world, written)
+    world.install()
+    lines, _ = collect_lines(world.context(), world.status())
+    assert f"OK credential path {written} exists and the managed settings deny it" in [
+        f"{line.level} {line.text}" for line in lines
+    ]
+    assert not texts(lines, FAIL), texts(lines, FAIL)
+
+
+@pytest.mark.parametrize("written", FILE_CREDENTIALS)
+def test_a_present_credential_file_the_dropin_lacks_fails(world: World, written: str) -> None:
+    _create_credential_file(world, written)
+    settings: dict[str, Any] = required_settings(world.facts, user_home=str(world.user))
+    credentials = settings["sandbox"]["credentials"]
+    credentials["files"] = [f for f in credentials["files"] if f["path"] != written]
+    deny = settings["permissions"]["deny"]
+    settings["permissions"]["deny"] = [r for r in deny if r != f"Read({written})"]
+    world.install(settings)
+    lines, _ = collect_lines(world.context(), world.status())
+    assert (
+        f"credential path {written} exists and is not denied: "
+        "lacks sandbox.credentials.files and a Read(...) rule in permissions.deny"
+    ) in texts(lines, FAIL)
+
+
+@pytest.mark.parametrize("written", FILE_CREDENTIALS)
+def test_a_recursive_rule_rooted_at_the_credential_file_fails(world: World, written: str) -> None:
+    _create_credential_file(world, written)
+    settings: dict[str, Any] = required_settings(world.facts, user_home=str(world.user))
+    deny = settings["permissions"]["deny"]
+    settings["permissions"]["deny"] = [
+        f"Read({written}/**)" if r == f"Read({written})" else r for r in deny
+    ]
+    world.install(settings)
+    lines, _ = collect_lines(world.context(), world.status())
+    assert (
+        f"credential path {written} exists and is not denied: "
+        "lacks a Read(...) rule in permissions.deny"
+    ) in texts(lines, FAIL)
+
+
 def test_a_dropin_without_fail_if_unavailable_fails_naming_it(world: World) -> None:
     settings = required_settings(world.facts, user_home=str(world.user))
     del settings["sandbox"]["failIfUnavailable"]  # type: ignore[attr-defined,index]
