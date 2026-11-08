@@ -194,6 +194,8 @@ async def test_a_live_agent_socket_of_another_home_refuses_start(shortdir: Path)
         assert result_data(await call(env.agent_socket, "status"))["state"] == "locked"
 
 
+# In the sandbox the first bind fails, and the unmatched `pytest.raises` is an AssertionError,
+# which the sandbox report hook does not turn into a skip.
 @pytest.mark.skipif(BIND_BLOCKED, reason=REASON)
 async def test_a_failure_after_the_first_bind_leaves_no_socket(shortdir: Path) -> None:
     env = make_env(shortdir)
