@@ -32,6 +32,8 @@ EXPECTED_KEYS = {
     "MODGUDR_SESSION",
     "KUBECONFIG",
     "AZURE_CONFIG_DIR",
+    "UV_CACHE_DIR",
+    "npm_config_cache",
     "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
 }
 #: Added by the operating system or by the fake's interpreter (locale coercion sets LC_CTYPE in a

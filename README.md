@@ -161,6 +161,10 @@ whatever you add with `--pass-env`) and sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1
 allow list prompts you for approval. The `modgudr` command itself is allowed. Expect a prompt for
 anything else the agent runs.
 
+`agent run` also gives the session uv and npm caches that only agents use, under
+`/tmp/claude-<uid>`, so the sandbox never writes to `~/.cache/uv`. A plain `claude` session gets
+them only from `env` in user settings.
+
 ## How a Bash command from Claude Code is checked
 
 With the managed settings installed, every Bash command the agent runs passes the checks below.

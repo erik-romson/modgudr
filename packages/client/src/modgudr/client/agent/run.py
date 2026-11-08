@@ -84,6 +84,7 @@ def build_environment(
     env: str | None,
     pass_env: Sequence[str],
     azure_dir: str,
+    agent_tmp: str,
 ) -> dict[str, str]:
     """The child environment of M21: the allowlist, `--pass-env` names, then the fixed variables."""
     child = {name: value for name, value in parent.items() if is_allowed(name)}
@@ -99,8 +100,19 @@ def build_environment(
         child["MODGUDR_SOCKET"] = parent["MODGUDR_SOCKET"]
     child["KUBECONFIG"] = os.devnull
     child["AZURE_CONFIG_DIR"] = azure_dir
+    child["UV_CACHE_DIR"] = f"{agent_tmp}/uv-cache"
+    child["npm_config_cache"] = f"{agent_tmp}/npm-cache"
     child[SCRUB_VARIABLE] = "1"
     return child
+
+
+def agent_tmp_dir() -> str:
+    """The directory for caches that only agents use.
+
+    Not `tempfile`: `agent run` starts outside the sandbox, where `$TMPDIR` points at a directory
+    that sandboxed commands cannot write. `/tmp/claude-<uid>` is writable inside it.
+    """
+    return f"/tmp/claude-{os.getuid()}"
 
 
 def make_azure_dir() -> str:
@@ -187,7 +199,12 @@ def run_claude(
     session = new_session()
     azure_dir = make_azure_dir()
     child = build_environment(
-        parent, session=session, env=chosen, pass_env=pass_env, azure_dir=azure_dir
+        parent,
+        session=session,
+        env=chosen,
+        pass_env=pass_env,
+        azure_dir=azure_dir,
+        agent_tmp=agent_tmp_dir(),
     )
     _note(f"session {session}" + (f", environment {chosen}" if chosen else ""))
     if status is not None and status.get("isolation") == "none":
