@@ -149,6 +149,8 @@ def test_the_dropin_has_every_m20_key(world: World) -> None:
         "~/Library/DBeaverData",
         "~/.sqldeveloper",
         "~/.ssh",
+        "~/.docker/config.json",
+        "~/.git-credentials",
         "~/.modgudr",
         "~/.config/bws",
     ):
@@ -172,6 +174,7 @@ def test_the_dropin_has_every_m20_key(world: World) -> None:
     assert network["allowLocalBinding"] is False
     permissions = doc["permissions"]
     assert permissions["disableBypassPermissionsMode"] == "disable"
+    assert permissions["blockWritesOutsideWorkingDirectories"] is True
     deny = permissions["deny"]
     for tool in (
         "kubectl",
