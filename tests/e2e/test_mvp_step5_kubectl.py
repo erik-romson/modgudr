@@ -134,7 +134,7 @@ def test_login_azure_runs_az_login_into_the_custody_directory(
 def test_a_missing_kubectl_shows_in_status_and_calls_fail(shortdir: Path, fakebin: FakeBin) -> None:
     (fakebin.bin / "kubectl").unlink()
     set_scenario(fakebin)
-    with BrokerThread(kube_env(shortdir, fakebin)) as thread:
+    with BrokerThread(kube_env(shortdir, fakebin, path=fakebin.bare_path())) as thread:
         thread.unlock()
         env = thread.env
         status = cli(env, "status")
