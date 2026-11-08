@@ -314,16 +314,17 @@ def test_round_trip_through_detection(
 def test_the_hook_entry(world: World) -> None:
     doc = generate(world)
     entries = doc["hooks"]["PreToolUse"]
-    assert len(entries) == 1 and entries[0]["matcher"] == "Bash"
-    assert entries[0]["hooks"] == [
-        {
-            "type": "command",
-            "command": "/usr/bin/python3",
-            "args": ["-I", "/opt/modgudr/bin/mg-hook"],
-            "timeout": 10,
-            "onFailure": "block",
-        }
-    ]
+    assert [entry["matcher"] for entry in entries] == ["Bash", "Write|Edit|MultiEdit|NotebookEdit"]
+    for entry in entries:
+        assert entry["hooks"] == [
+            {
+                "type": "command",
+                "command": "/usr/bin/python3",
+                "args": ["-I", "/opt/modgudr/bin/mg-hook"],
+                "timeout": 10,
+                "onFailure": "block",
+            }
+        ]
     assert doc["permissions"]["allow"] == ["Bash(modgudr:*)"]
 
 

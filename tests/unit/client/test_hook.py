@@ -246,6 +246,86 @@ def test_an_internal_error_allows_with_one_line(
     assert message == "mg-hook: internal error (RuntimeError: injected); allowing\n"
 
 
+def file_call(tool: str, path: object, key: str = "file_path") -> str:
+    return json.dumps({"tool_name": tool, "tool_input": {key: path}})
+
+
+@pytest.mark.parametrize(
+    ("tool", "path", "key"),
+    [
+        ("Write", "/r/.claude/settings.local.json", "file_path"),
+        ("Edit", "/r/.claude/skills/x/SKILL.md", "file_path"),
+        ("MultiEdit", "/r/.claude/commands/x.md", "file_path"),
+        ("NotebookEdit", "/r/.claude/a.ipynb", "notebook_path"),
+        ("Write", "/r/.CLAUDE/x", "file_path"),
+        ("Write", "/r/tmp/plans/x/.claude/y", "file_path"),
+        ("Write", "/r/.claude/worktrees/w/.claude/skills/x.md", "file_path"),
+        ("Write", "/r/.claude/../.claude/x", "file_path"),
+    ],
+)
+def test_file_tools_are_refused_under_claude(setup: Setup, tool: str, path: str, key: str) -> None:
+    code, message = setup.feed(file_call(tool, path, key))
+    assert code == 2
+    assert path in message and "agent-apply" not in message
+    assert message.count("\n") == 1
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/r/.claude/worktrees/w/src/a.py",
+        "/r/src/a.py",
+        "/r/.claude-extra/a",
+        "/r/x.claude",
+    ],
+)
+def test_file_tools_are_allowed_elsewhere(setup: Setup, path: str) -> None:
+    assert setup.feed(file_call("Write", path)) == (0, "")
+
+
+def test_a_symlink_to_claude_is_refused(setup: Setup) -> None:
+    target = setup.root / ".claude"
+    target.mkdir()
+    (setup.root / "link").symlink_to(target)
+    code, message = setup.feed(file_call("Write", str(setup.root / "link" / "x")))
+    assert code == 2 and "Claude Code configuration" in message
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"tool_name": "Write", "tool_input": {}}',
+        '{"tool_name": "Write", "tool_input": {"file_path": 5}}',
+        '{"tool_name": "Write", "tool_input": {"file_path": ""}}',
+        '{"tool_name": "Write", "tool_input": []}',
+        '{"tool_name": "Write"}',
+        '{"tool_name": "NotebookEdit", "tool_input": {"file_path": "/r/a.ipynb"}}',
+    ],
+)
+def test_a_file_tool_without_a_usable_path_is_refused(setup: Setup, payload: str) -> None:
+    code, message = setup.feed(payload)
+    assert code == 2 and message.startswith("Blocked:")
+
+
+def test_a_file_tool_error_is_refused(setup: Setup, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(path: str, home: str) -> str:
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr(hook, "decide_file", boom)
+    code, message = setup.feed(file_call("Write", "/r/src/a.py"))
+    assert code == 2 and message.startswith("Blocked:")
+
+
+def test_decide_file_with_a_home() -> None:
+    assert hook.decide_file("/h/.claude/settings.json", "/h") is not None
+    assert hook.decide_file("/h/.claude/plans/p.md", "/h") is None
+    assert hook.decide_file("/h/.claude/jobs/j/tmp/x", "/h") is None
+    assert hook.decide_file("/h/.claude/plans", "/h") is not None
+    assert hook.decide_file("/h/.claude/jobs/j/tmp", "/h") is not None
+    assert hook.decide_file("/r/.claude/worktrees/w", "/h") is not None
+    assert hook.decide_file("/r/.claude/plans/p.md", "/h") is not None
+
+
 def test_split_commands() -> None:
     assert hook.split_commands('a "b c" ; d && e || f | g & h') == [
         ["a", "b c"],

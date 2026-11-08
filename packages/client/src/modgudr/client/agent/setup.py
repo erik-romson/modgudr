@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from modgudr.client import paths
-from modgudr.client.agent.hook import BLOCKED_TOOLS
+from modgudr.client.agent.hook import BLOCKED_TOOLS, FILE_TOOLS
 from modgudr.client.agent.isolation import (
     SETTINGS_DIRS,
     Facts,
@@ -123,9 +123,9 @@ def read_broker_facts(status: object, targets: object, *, platform: str) -> Brok
 # --- the settings --------------------------------------------------------------------------------
 
 
-def hook_entry() -> dict[str, Any]:
+def hook_entry(matcher: str) -> dict[str, Any]:
     return {
-        "matcher": "Bash",
+        "matcher": matcher,
         "hooks": [
             {
                 "type": "command",
@@ -158,7 +158,7 @@ def build_settings(
     permissions: dict[str, Any] = settings["permissions"]  # pyright: ignore[reportAssignmentType]
     permissions["allow"] = ["Bash(modgudr:*)"]
     permissions["deny"] = [*permissions["deny"], *(f"Bash({tool}:*)" for tool in BLOCKED_TOOLS)]
-    settings["hooks"] = {"PreToolUse": [hook_entry()]}
+    settings["hooks"] = {"PreToolUse": [hook_entry("Bash"), hook_entry("|".join(FILE_TOOLS))]}
     return settings
 
 

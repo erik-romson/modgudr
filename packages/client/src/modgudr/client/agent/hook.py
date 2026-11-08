@@ -14,11 +14,17 @@ URL whose host is a target destination. The destinations come from the `targets`
 (300 ms timeout), cached for 30 s in a 0600 file under `$TMPDIR`. When the broker is down only the
 host check is skipped. Everything else exits 0.
 
-This is steering, not a boundary. An internal error writes one line to stderr and exits 0;
-`onFailure: "block"` in the settings already covers a hook that cannot start. Known miss, on
-purpose: the hook can be bypassed with `bash -c "kubectl …"`, `eval`, a script file or any other
-indirection it does not parse. The sandbox and the deny rules of the managed settings are the
-boundary, not this hook.
+The Write, Edit, MultiEdit and NotebookEdit tools are refused (exit 2) when their path has a
+`.claude` part, apart from Claude Code's own exempt paths (see `decide_file`).
+
+The Bash steering is best-effort and fails open: it is steering, not a boundary. An internal error
+there writes one line to stderr and exits 0; `onFailure: "block"` in the settings already covers a
+hook that cannot start. Known miss, on purpose: the hook can be bypassed with `bash -c "kubectl …"`,
+`eval`, a script file or any other indirection it does not parse. The sandbox and the deny rules of
+the managed settings are the boundary, not this hook.
+
+The file-tool branch fails closed: a missing, empty or non-string path, or any error while
+deciding, blocks the call.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pwd
 import re
 import socket
 import sys
@@ -49,6 +56,8 @@ BLOCKED_TOOLS = (
 )
 #: Commands that fetch a URL; one naming a target host is blocked.
 FETCH_TOOLS = ("curl", "wget", "http")
+#: The file tools whose writes under `.claude/` are refused.
+FILE_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
 CACHE_SECONDS = 30.0
 BROKER_TIMEOUT = 0.3
@@ -288,8 +297,6 @@ def agent_socket_path(environ: Mapping[str, str]) -> str:
     if override:
         return override
     if sys.platform == "darwin":
-        import pwd
-
         home = pwd.getpwuid(os.getuid()).pw_dir
         return str(Path(home) / "Library" / "Caches" / "modgudr" / "run" / "agent.sock")
     runtime = environ.get("XDG_RUNTIME_DIR")
@@ -442,6 +449,63 @@ def decide(command: str, hosts: Callable[[], Sequence[str]]) -> str | None:
     return None
 
 
+def _lower_parts(path: str) -> list[str]:
+    return [part for part in path.lower().split("/") if part]
+
+
+def _exempt(parts: Sequence[str], home_parts: Sequence[str]) -> bool:
+    """Whether a path with exactly one `.claude` part is one Claude Code writes itself."""
+    if parts.count(".claude") != 1:
+        return False
+    at = parts.index(".claude")
+    below = parts[at + 1 :]
+    if len(below) > 2 and below[0] == "worktrees":
+        return True  # .claude/worktrees/<name>/...
+    base = [*home_parts, ".claude"]
+    if parts[: len(base)] != base:
+        return False
+    rest = parts[len(base) :]
+    if len(rest) > 1 and rest[0] == "plans":
+        return True  # <home>/.claude/plans/...
+    # <home>/.claude/jobs/<id>/tmp/...
+    return len(rest) > 3 and rest[0] == "jobs" and rest[2] == "tmp"
+
+
+def decide_file(path: str, home: str) -> str | None:
+    """The reason to block a file-tool write to `path`, or None to allow it.
+
+    Paths under `.claude/` are Claude Code configuration, apart from `.claude/worktrees/<name>/...`
+    (no further `.claude` part), `<home>/.claude/plans/...` and `<home>/.claude/jobs/<id>/tmp/...`.
+    Parts are compared lower-cased, since macOS volumes are case-insensitive. A path without a
+    `.claude` part whose real path has one (a symlink) is blocked as well.
+    """
+    reason = f"Blocked: {path} is Claude Code configuration; ask the user to make this change."
+    parts = _lower_parts(os.path.normpath(path))
+    if ".claude" in parts:
+        return None if _exempt(parts, _lower_parts(os.path.normpath(home))) else reason
+    if ".claude" in _lower_parts(os.path.realpath(path)):
+        return reason
+    return None
+
+
+def _file_tool(tool_name: str, tool_input: dict[str, Any] | None, err: TextIO) -> int:
+    """The decision for a file-tool call: 2 to block, 0 to allow. Fails closed and never raises."""
+    try:
+        key = "notebook_path" if tool_name == "NotebookEdit" else "file_path"
+        path = tool_input.get(key) if tool_input is not None else None
+        if not isinstance(path, str) or not path:
+            reason: str | None = f"Blocked: {tool_name} has no usable {key}."
+        else:
+            reason = decide_file(path, pwd.getpwuid(os.getuid()).pw_dir)
+    except Exception as exc:
+        reason = f"Blocked: mg-hook cannot check this {tool_name} call ({type(exc).__name__})."
+    if reason is None:
+        return 0
+    with contextlib.suppress(Exception):
+        err.write(reason + "\n")
+    return 2
+
+
 def main(
     stdin: TextIO | None = None,
     stderr: TextIO | None = None,
@@ -460,6 +524,9 @@ def main(
             return 0
         document = _as_dict(payload)
         tool_input = _as_dict(document.get("tool_input")) if document is not None else None
+        tool_name = document.get("tool_name") if document is not None else None
+        if isinstance(tool_name, str) and tool_name in FILE_TOOLS:
+            return _file_tool(tool_name, tool_input, err)
         command = tool_input.get("command") if tool_input is not None else None
         if not isinstance(command, str):
             return 0
