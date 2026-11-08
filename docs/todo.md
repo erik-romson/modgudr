@@ -3,17 +3,6 @@
 Small fixes and improvements that came up while using modgudr. Larger plans live in
 `future-plans.md`.
 
-## `agent-setup`: keep the allowed domains when adding one
-
-`modgudr agent-setup claude --allow-domain D` replaces the default list instead of adding to it. To
-allow one more domain, a developer has to retype every domain that the installed drop-in already
-allows, and a forgotten domain silently disappears.
-
-The generator should read `allowedDomains` from the installed drop-in and keep them. A separate flag
-such as `--remove-domain` would then take one away. The install notes should also print the
-difference between the installed drop-in and the new one, so the developer can review the change
-before running `sudo`.
-
 ## `agent-setup`: domain presets for GitHub and Maven
 
 GitHub now redirects release downloads to `release-assets.githubusercontent.com`. A developer who

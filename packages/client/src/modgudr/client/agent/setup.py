@@ -192,8 +192,58 @@ def install_target(platform: str) -> str:
     return f"{SETTINGS_DIRS[platform]}/{DROPIN_DIR}/{DROPIN_FILE}"
 
 
+def installed_dropin(platform: str) -> Path:
+    """The drop-in an earlier install left. There is no environment override: the reason is in
+    the docstring of `modgudr.client.agent.isolation`."""
+    return Path(install_target(platform))
+
+
+def installed_domains(path: Path) -> tuple[str, ...] | None:
+    """The `allowedDomains` of the installed drop-in, or `None` when there is no such file.
+
+    Raises `UsageError` for anything else that is wrong with it: a foreign file must not donate
+    domains, and a broken one must not be mistaken for an empty one."""
+    try:
+        text = path.read_text("utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise UsageError(
+            f"cannot read the installed drop-in {path}: {exc.strerror or exc}"
+        ) from None
+    except ValueError:
+        raise UsageError(f"the installed drop-in {path} is not UTF-8 text") from None
+    try:
+        document = json.loads(text)
+    except ValueError:
+        raise UsageError(f"the installed drop-in {path} is not JSON") from None
+    if not isinstance(document, dict):
+        raise UsageError(f"the installed drop-in {path} is not a JSON object")
+    fields = cast("dict[str, Any]", document)
+    if MARKER_KEY not in fields:
+        raise UsageError(
+            f"the installed drop-in {path} has no {MARKER_KEY} marker, so modgudr did not write it"
+        )
+    sandbox = _as_dict(fields.get("sandbox"))
+    network = _as_dict(sandbox.get("network")) if sandbox is not None else None
+    listed = _as_list(network.get("allowedDomains")) if network is not None else None
+    if listed is None:
+        raise UsageError(f"the installed drop-in {path} has no sandbox.network.allowedDomains list")
+    domains: list[str] = []
+    for entry in listed:
+        if not isinstance(entry, str):
+            raise UsageError(f"the installed drop-in {path} lists a domain that is not a string")
+        domains.append(entry)
+    return tuple(domains)
+
+
 def install_text(
-    broker: BrokerFacts, *, out: Path, version: str, allow_domains: Sequence[str]
+    broker: BrokerFacts,
+    *,
+    out: Path,
+    version: str,
+    allow_domains: Sequence[str],
+    installed: Sequence[str] | None,
 ) -> str:
     """`INSTALL.txt`: the `sudo` steps, how to undo them and how to verify them."""
     facts = broker.facts
@@ -217,6 +267,15 @@ def install_text(
         f"  human socket:   {facts.human_socket} (denied to the sandbox)",
         f"  allowed domains: {', '.join(allow_domains) or 'none'}",
     ]
+    if installed is None:
+        lines.append("    no drop-in installed")
+    else:
+        kept = {d.lower() for d in allow_domains}
+        known = {d.lower() for d in installed}
+        added = [d for d in allow_domains if d.lower() not in known]
+        removed = [d for d in installed if d.lower() not in kept]
+        lines.append(f"    added: {', '.join(added) or 'none'}")
+        lines.append(f"    removed: {', '.join(removed) or 'none'}")
     if broker.targets:
         lines.append("  targets:")
         lines += [
@@ -259,14 +318,55 @@ def install_text(
 # --- the command ---------------------------------------------------------------------------------
 
 
-def _check_domains(domains: Sequence[str]) -> tuple[str, ...]:
+def _check_domains(domains: Sequence[str], *, what: str) -> tuple[str, ...]:
     for domain in domains:
         if not _DOMAIN.fullmatch(domain):
             raise UsageError(
-                f"--allow-domain {domain!r} is not a domain; give a host name such as "
+                f"{what} {domain!r} is not a domain; give a host name such as "
                 "pypi.org or *.example.net"
             )
     return tuple(dict.fromkeys(domains))
+
+
+def _check_flags(allow: Sequence[str], remove: Sequence[str]) -> tuple[str, ...]:
+    """The flags alone, before the installed file is read. Returns the new entries, lower-case."""
+    both = {d.lower() for d in allow} & {d.lower() for d in remove}
+    if both:
+        raise UsageError(f"--allow-domain and --remove-domain both name {sorted(both)[0]!r}")
+    return _check_domains([d.lower() for d in allow], what="--allow-domain")
+
+
+def _merge_domains(
+    installed: tuple[str, ...] | None,
+    added: Sequence[str],
+    remove: Sequence[str],
+    *,
+    path: Path,
+) -> tuple[str, ...]:
+    """The allowed domains of the new drop-in. Domains compare case-insensitively."""
+    if installed is None:
+        if remove:
+            raise UsageError(
+                f"--remove-domain needs an installed drop-in, and {path} does not exist: "
+                "there is nothing to remove from"
+            )
+        return tuple(added) or DEFAULT_ALLOWED_DOMAINS
+    gone = {d.lower() for d in remove}
+    missing = gone - {d.lower() for d in installed}
+    if missing:
+        raise UsageError(
+            f"--remove-domain {sorted(missing)[0]!r} is not in the installed drop-in. "
+            f"Installed domains: {', '.join(installed) or 'none'}. "
+            f"Only {DROPIN_FILE} ({path}) is read; other files in {DROPIN_DIR} are not"
+        )
+    kept = [d for d in installed if d.lower() not in gone]
+    seen: set[str] = set()
+    merged: list[str] = []
+    for domain in (*kept, *added):
+        if domain.lower() not in seen:
+            seen.add(domain.lower())
+            merged.append(domain)
+    return _check_domains(merged, what="allowed domain")
 
 
 def _has_marker(path: Path) -> bool:
@@ -286,6 +386,7 @@ def run_setup(
     allow_domains: Sequence[str],
     *,
     force: bool,
+    remove_domains: Sequence[str] = (),
     platform: str | None = None,
     uid: int | None = None,
     user_home: str | None = None,
@@ -302,7 +403,11 @@ def run_setup(
             "agent-setup refuses to run as root or under sudo: the paths would be root's. "
             "Run it as yourself; only the printed install lines use sudo"
         )
-    domains = _check_domains(allow_domains or DEFAULT_ALLOWED_DOMAINS)
+    where = platform or current_platform()
+    installed_path = installed_dropin(where)
+    added = _check_flags(allow_domains, remove_domains)
+    installed = installed_domains(installed_path)
+    domains = _merge_domains(installed, added, remove_domains, path=installed_path)
     out = out.absolute()
     dropin = out / DROPIN_DIR / DROPIN_FILE
     if dropin.exists() and not _has_marker(dropin):
@@ -315,7 +420,6 @@ def run_setup(
         raise UsageError(
             f"{', '.join(str(p) for p in existing)} already exist(s); use --force to overwrite"
         )
-    where = platform or current_platform()
     broker = read_broker_facts(_meta("status"), _meta("targets"), platform=where)
     home = user_home if user_home is not None else pwd.getpwuid(os.getuid()).pw_dir
     version = client_version()
@@ -323,7 +427,9 @@ def run_setup(
     text = json.dumps(settings, indent=2) + "\n"
     validate_settings(text, broker.facts, user_home=home, version=version)
     hook = hook_source()
-    instructions = install_text(broker, out=out, version=version, allow_domains=domains)
+    instructions = install_text(
+        broker, out=out, version=version, allow_domains=domains, installed=installed
+    )
     dropin.parent.mkdir(parents=True, exist_ok=True)
     dropin.write_text(text, "utf-8")
     hook_path = out / HOOK_FILE

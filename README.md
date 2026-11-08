@@ -107,7 +107,7 @@ local file. Dev mode is for tests: it marks every audit line `dev: true` and is 
 | `modgudr unlock`, `modgudr lock` | the store session (your own terminal only) |
 | `modgudr audit tail [options]` | recent audit records as ndjson (your own terminal only) |
 | `modgudr login azure <target> [--device-code]` | the Azure CLI login of a custody target |
-| `modgudr agent-setup claude [--out DIR]` | generate the Claude Code managed settings and hook |
+| `modgudr agent-setup claude [--out DIR] [--allow-domain D]… [--remove-domain D]…` | generate the Claude Code managed settings and hook |
 | `modgudr agent run claude [--env E] [--pass-env NAME]… [-- ARGS]` | start Claude Code with a clean environment |
 | `modgudr doctor [--agent claude]` | check the set-up; `--agent` also probes the sandbox (spends API tokens) |
 | `modgudr agent-docs claude` | print the Claude Code skill |
@@ -240,13 +240,11 @@ the whole list. Domains in your own settings are ignored, and the agent cannot a
 host for a single command. To let Bash reach a host, generate the managed settings again with the
 domain added and install the file again:
 
-    modgudr agent-setup claude --force \
-        --allow-domain pypi.org --allow-domain files.pythonhosted.org \
-        --allow-domain registry.npmjs.org --allow-domain www.vg.no
+    modgudr agent-setup claude --force --allow-domain www.vg.no
 
-`--allow-domain` replaces the default list, so repeat every domain you want to keep. For a single
-download, type `! curl …` in Claude Code instead: a command that starts with `!` runs outside the
-sandbox.
+`--allow-domain` adds to the list in the installed drop-in, and `--remove-domain` takes one away.
+With no drop-in installed, the list starts from the defaults. For a single download, type
+`! curl …` in Claude Code instead: a command that starts with `!` runs outside the sandbox.
 
 ## Bitwarden licence
 
