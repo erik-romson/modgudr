@@ -165,7 +165,8 @@ anything else the agent runs.
 
 With the managed settings installed, every Bash command the agent runs passes the checks below.
 Any one of them can stop it. The hook only steers (it misses `bash -c "kubectl …"`); the sandbox
-and the deny rules are the boundary.
+and the deny rules are the boundary. The hook also refuses the Write, Edit, MultiEdit and
+NotebookEdit tools under `.claude/`; that part does not cover Bash.
 
 ```mermaid
 flowchart TD
