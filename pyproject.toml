@@ -88,7 +88,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
-    "oracle: needs Docker and the Oracle Free image; fails when Docker is missing, except in the agent sandbox, where it is reported as skipped",
+    "oracle: needs Docker and the Oracle Free image; fails without Docker, skipped in the sandbox",
     "kind: needs a kind cluster; opt in with MODGUDR_TEST_KIND=1",
     "snowflake_live: needs a live Snowflake account; opt in with MODGUDR_SF_LIVE=1",
 ]
