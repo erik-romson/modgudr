@@ -10,10 +10,12 @@ M8 hold (see the run report for why this is not `oracledb.create_pool`).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import re
-from collections.abc import Mapping, Sequence
+import threading
+from collections.abc import Callable, Generator, Mapping, Sequence
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +42,9 @@ DEAD_CODES = frozenset({"ORA-00028", "ORA-03113", "ORA-03114", "ORA-03135", "DPY
 TIMEOUT_CODES = frozenset({"DPY-4024", "ORA-01013"})
 #: The listener cannot be reached: refused, unresolvable, timed out.
 UNREACHABLE_CODES = frozenset({"DPY-6005", "ORA-12541", "ORA-12170", "ORA-12535"})
+
+#: After this long without the cancelled call returning, `abandon` logs a warning and keeps waiting.
+ABANDON_WARN = 10.0
 
 #: An audit id goes into `EXPLAIN PLAN SET STATEMENT_ID = '…'` (30 characters at most).
 _STATEMENT_ID = re.compile(r"[A-Za-z0-9_-]{1,30}")
@@ -76,8 +81,11 @@ def _output_type_handler(cursor: oracledb.Cursor, metadata: oracledb.FetchInfo) 
 
 
 class OracleStatement:
-    def __init__(self, cursor: oracledb.Cursor) -> None:
+    def __init__(
+        self, cursor: oracledb.Cursor, using: Callable[[], contextlib.AbstractContextManager[None]]
+    ) -> None:
         self._cursor = cursor
+        self._using = using
         description: list[Any] = cursor.description or []
         self._names = [str(d.name) for d in description]
         self._type_names = [str(d.type_code.name) for d in description]
@@ -100,22 +108,37 @@ class OracleStatement:
         return count if count >= 0 else None
 
     def fetch(self, size: int, budget: int) -> Sequence[Sequence[Cell]]:
-        try:
-            rows: list[Any] = self._cursor.fetchmany(1 if self._lobs else size)
-            return [
-                encode_row(row, self._kinds, self._type_names, self._names, budget) for row in rows
-            ]
-        except oracledb.Error as exc:
-            raise _translate(exc) from None
+        with self._using():
+            try:
+                rows: list[Any] = self._cursor.fetchmany(1 if self._lobs else size)
+                return [
+                    encode_row(row, self._kinds, self._type_names, self._names, budget)
+                    for row in rows
+                ]
+            except oracledb.Error as exc:
+                raise _translate(exc) from None
 
     def close(self) -> None:
-        self._cursor.close()
+        with contextlib.suppress(SessionDead), self._using():
+            self._cursor.close()
 
 
 class OracleSession:
+    """One connection. Every blocking call on it holds `_lock`, so `abandon`, which runs in a
+    disposal thread, never drops the connection under a call that is still inside it."""
+
     def __init__(self, conn: oracledb.Connection, own_schema: str) -> None:
         self._conn = conn
         self._own_schema = own_schema
+        self._lock = threading.Lock()
+        self._abandoned = False
+
+    @contextlib.contextmanager
+    def _using(self) -> Generator[None]:
+        with self._lock:
+            if self._abandoned:
+                raise SessionDead("the Oracle session was abandoned")
+            yield
 
     def run(
         self,
@@ -128,28 +151,29 @@ class OracleSession:
         schema: str | None,
     ) -> Statement:
         assert isinstance(params, Mapping)
-        conn = self._conn
-        cursor = conn.cursor()
-        try:
-            conn.call_timeout = max(1, math.ceil(timeout * 1000))
-            conn.module = "modgudr"
-            conn.action = op
-            conn.client_identifier = tag
-            conn.current_schema = schema if schema is not None else self._own_schema
-            binds = dict(params) or None
-            if op == "plan":
-                self._explain(cursor, sql, binds, tag)
-            else:
-                if op != "write":
-                    cursor.execute("SET TRANSACTION READ ONLY")
-                cursor.execute(sql, binds)
-            return OracleStatement(cursor)
-        except oracledb.Error as exc:
-            cursor.close()
-            raise _translate(exc) from None
-        except BaseException:
-            cursor.close()
-            raise
+        with self._using():
+            conn = self._conn
+            cursor = conn.cursor()
+            try:
+                conn.call_timeout = max(1, math.ceil(timeout * 1000))
+                conn.module = "modgudr"
+                conn.action = op
+                conn.client_identifier = tag
+                conn.current_schema = schema if schema is not None else self._own_schema
+                binds = dict(params) or None
+                if op == "plan":
+                    self._explain(cursor, sql, binds, tag)
+                else:
+                    if op != "write":
+                        cursor.execute("SET TRANSACTION READ ONLY")
+                    cursor.execute(sql, binds)
+                return OracleStatement(cursor, self._using)
+            except oracledb.Error as exc:
+                cursor.close()
+                raise _translate(exc) from None
+            except BaseException:
+                cursor.close()
+                raise
 
     @staticmethod
     def _explain(
@@ -176,37 +200,56 @@ class OracleSession:
         conn.current_schema = self._own_schema
 
     def commit(self) -> None:
-        try:
-            self._reset()
-            self._conn.commit()
-        except oracledb.Error as exc:
-            raise _translate(exc) from None
+        with self._using():
+            try:
+                self._reset()
+                self._conn.commit()
+            except oracledb.Error as exc:
+                raise _translate(exc) from None
 
     def rollback(self) -> None:
-        try:
-            self._reset()
-            self._conn.rollback()
-        except oracledb.Error as exc:
-            raise _translate(exc) from None
+        with self._using():
+            try:
+                self._reset()
+                self._conn.rollback()
+            except oracledb.Error as exc:
+                raise _translate(exc) from None
 
     def close(self) -> None:
-        self._conn.close()
+        with contextlib.suppress(SessionDead), self._using():
+            self._conn.close()
 
     def abandon(self) -> None:
-        """Break what runs from this thread (`connection.cancel()`), then drop the connection
-        without a logoff round trip. `close()` would talk to the server again, can fail on a
-        connection that was just broken (`StopIteration`), and waits for a worker that is still
-        inside it; `terminate()` of the implementation closes the socket at once, which frees the
-        server session and any LOB locators. Errors are logged by type and never raised."""
+        """Break what runs from this thread (`connection.cancel()`), wait for that call to return,
+        then drop the connection without a logoff round trip.
+
+        `cancel()` is safe while another thread is inside the connection; `terminate()` is not:
+        it closes the socket under the running call, which can crash the interpreter. So the
+        drop waits for `_lock`. This runs in a disposal thread (`pool.dispose`), so the wait
+        blocks nothing else; the call's `call_timeout` bounds it, and after `ABANDON_WARN`
+        seconds a warning is logged.
+        `close()` would talk to the server again and can fail on a connection that was just
+        broken (`StopIteration`); `terminate()` of the implementation closes the socket at once,
+        which frees the server session and any LOB locators. Errors are logged by type and never
+        raised. Afterwards every call on the session raises `SessionDead`."""
         conn: Any = self._conn  # `terminate` is not on the sync stubs
         try:
             conn.cancel()
         except Exception as exc:
             log.warning("could not cancel the Oracle call: %s", type(exc).__name__)
+        if not self._lock.acquire(timeout=ABANDON_WARN):
+            log.warning(
+                "the Oracle call has not returned %.0f s after its cancel; still waiting",
+                ABANDON_WARN,
+            )
+            self._lock.acquire()
         try:
+            self._abandoned = True
             conn._impl.terminate()
         except Exception as exc:
             log.warning("could not drop the Oracle session: %s", type(exc).__name__)
+        finally:
+            self._lock.release()
 
 
 class OracleDriver:
