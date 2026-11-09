@@ -59,10 +59,11 @@ OPERATIONS = (
     ),
     OperationSpec(
         "slow",
-        "emit rows with a pause before each",
+        "emit rows with a pause before each, then optionally hold without writing",
         (
             ArgSpec("rows", "int", "how many rows", required=False, flag="--rows"),
             ArgSpec("delayMs", "int", "pause per row", required=False, flag="--delay-ms"),
+            ArgSpec("holdMs", "int", "wait after the last row", required=False, flag="--hold-ms"),
         ),
     ),
     OperationSpec("boom", "raise an exception"),
@@ -131,6 +132,8 @@ class EchoTarget:
         for i in range(count):
             await asyncio.sleep(pause)
             await sink.row([str(i)])
+        hold = call.args.get("holdMs", 0)
+        await asyncio.sleep((hold if isinstance(hold, int) else 0) / 1000)
 
     async def _op_boom(self, call: Call, sink: ResultSink) -> None:
         raise RuntimeError("boom")
