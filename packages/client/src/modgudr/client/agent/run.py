@@ -10,9 +10,11 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from modgudr.client import paths
@@ -115,6 +117,30 @@ def agent_tmp_dir() -> str:
     return f"/tmp/claude-{os.getuid()}"
 
 
+def private_dir(path: str) -> str:
+    """`path`, created with mode 0700 when missing, else refused unless it is a real directory
+    owned by this user that nobody else can write.
+
+    The agent's uv and npm caches live under the fixed, guessable `/tmp/claude-<uid>`. Another
+    local user could create it first and plant packages there, which the agent would then run.
+    """
+    try:
+        Path(path).mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise CannotRun(f"cannot create {path}: {exc.strerror or exc}") from None
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise CannotRun(f"{path} is not a directory (a symlink?); remove it and run again")
+    if st.st_uid != os.getuid():
+        raise CannotRun(f"{path} belongs to uid {st.st_uid}, not you; remove it and run again")
+    if st.st_mode & 0o022:
+        mode = stat.S_IMODE(st.st_mode)
+        raise CannotRun(f"{path} is writable by others (mode {mode:o}); run `chmod go-w {path}`")
+    return path
+
+
 def make_azure_dir() -> str:
     """A new empty directory, mode 0700, for `AZURE_CONFIG_DIR`."""
     return tempfile.mkdtemp(prefix="mg-azure-")
@@ -196,6 +222,9 @@ def run_claude(
         chosen = canonical_env(status, env) if status is not None else env
     for warning in warnings:
         _note(f"warning: {warning}")
+    agent_tmp = agent_tmp_dir()
+    for path in (agent_tmp, f"{agent_tmp}/uv-cache", f"{agent_tmp}/npm-cache"):
+        private_dir(path)
     session = new_session()
     azure_dir = make_azure_dir()
     child = build_environment(
@@ -204,7 +233,7 @@ def run_claude(
         env=chosen,
         pass_env=pass_env,
         azure_dir=azure_dir,
-        agent_tmp=agent_tmp_dir(),
+        agent_tmp=agent_tmp,
     )
     _note(f"session {session}" + (f", environment {chosen}" if chosen else ""))
     if status is not None and status.get("isolation") == "none":

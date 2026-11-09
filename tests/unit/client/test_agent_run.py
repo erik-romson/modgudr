@@ -21,6 +21,7 @@ from modgudr.client.agent.run import (
     agent_tmp_dir,
     build_environment,
     check_pass_env,
+    private_dir,
     run_claude,
 )
 from modgudr.client.errors import BrokerUnavailable, CannotRun, UsageError
@@ -291,3 +292,42 @@ def test_the_upper_case_npm_cache_name_is_dropped(fakebin: FakeBin, shortdir: Pa
 def test_the_agent_tmp_dir_is_per_user(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("os.getuid", lambda: 501)
     assert agent_tmp_dir() == "/tmp/claude-501"
+
+
+def test_a_missing_private_dir_is_created_0700(shortdir: Path) -> None:
+    path = shortdir / "c"
+    assert private_dir(str(path)) == str(path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o700
+
+
+def test_an_own_dir_that_others_can_only_read_is_kept(shortdir: Path) -> None:
+    path = shortdir / "c"
+    path.mkdir()
+    path.chmod(0o755)
+    assert private_dir(str(path)) == str(path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o755
+
+
+def test_a_dir_others_can_write_is_refused(shortdir: Path) -> None:
+    path = shortdir / "c"
+    path.mkdir()
+    path.chmod(0o777)
+    with pytest.raises(CannotRun, match="writable by others"):
+        private_dir(str(path))
+
+
+def test_a_symlinked_dir_is_refused(shortdir: Path) -> None:
+    real = shortdir / "real"
+    real.mkdir(mode=0o700)
+    (shortdir / "c").symlink_to(real)
+    with pytest.raises(CannotRun, match="not a directory"):
+        private_dir(str(shortdir / "c"))
+
+
+def test_a_dir_of_another_user_is_refused(shortdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = shortdir / "c"
+    path.mkdir(mode=0o700)
+    owner = path.stat().st_uid
+    monkeypatch.setattr("os.getuid", lambda: owner + 1)
+    with pytest.raises(CannotRun, match="not you"):
+        private_dir(str(path))
