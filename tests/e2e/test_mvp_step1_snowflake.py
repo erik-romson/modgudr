@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from collections.abc import Iterator
 from datetime import date
 from decimal import Decimal
@@ -134,7 +135,16 @@ def test_explain_names_the_layer_and_the_rule(served: BrokerThread) -> None:
 def test_the_audit_names_the_destination_and_never_the_bind_values(served: BrokerThread) -> None:
     env = served.env
     cli(env, "sf", "query", "select id from po where buyer = :b", "-p", "b=secret-buyer-name")
-    records = read_audit(env.audit_dir)
-    done = [r for r in records if r.get("type") == "completion"][-1]
+    # The broker sends the trailer before it writes the completion record, so the CLI can exit
+    # first.
+    deadline = time.monotonic() + 5
+    while True:
+        records = read_audit(env.audit_dir)
+        completions = [r for r in records if r.get("type") == "completion"]
+        if completions or time.monotonic() > deadline:
+            break
+        time.sleep(0.02)
+    assert completions, "no completion record within 5 s"
+    done = completions[-1]
     assert done["destination"] == "acme-example.snowflakecomputing.com:443"
     assert "secret-buyer-name" not in json.dumps(records)
