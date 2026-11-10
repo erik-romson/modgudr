@@ -111,6 +111,28 @@ BLOCKED = [
     f"http GET {HOST}/path",
     f"curl --url=https://{HOST}/",
     "curl http://[::1]:1522/",
+    "cat <<EOF\nhi $(kubectl get pods)\nEOF",
+    "cat <<EOF\n`kubectl get pods`\nEOF",
+    "cat <<'EOF'\nfix(sql): x\nEOF\nkubectl get pods",
+    "cat <<'EOF'\nEOF \nkubectl\nEOF\nsql x",
+    "echo $((1<<2))\nkubectl get pods",
+    "echo $((1<<2))\nkubectl get pods\n2",
+    "((x=1<<2))\nkubectl get pods",
+    "cat <<'EOF'\nkubectl get pods",
+    "for ((i=1<<2; i<9; i++)); do :; done\nkubectl get pods\n2",
+    "if ((1<<2)); then :; fi\nkubectl get pods\n2",
+    "echo $[1<<2]\nkubectl get pods\n2]",
+    "echo ${x:-a<<b}\nkubectl get pods\nb}",
+    "echo ${x:-$(kubectl get pods)}",
+    "a[1<<EOF]=1\nkubectl get pods\nEOF",
+    "cat <<${x}\nkubectl get pods\n${x}",
+    "cat <<E$(x)\nkubectl get pods\nE$(x)",
+    "echo ${x:-'}'} <<EOF\nkubectl get pods\nEOF",
+    "echo ${x:-'}'}; kubectl get pods",
+    'echo ${x:-"}$(kubectl get pods)"}',
+    "cat <<EOF\nE\\\nOF\nkubectl get pods\nEOF",
+    "cat <<EOF\n$(echo '\nEOF\nkubectl get pods\n')",
+    "cat <<EOF\n`echo\nEOF\nkubectl get pods\n`",
 ]
 
 ALLOWED = [
@@ -128,6 +150,13 @@ ALLOWED = [
     "echo 2>&1 done",
     'echo "$(date)" kubectl',
     "FOO=kubectl true",
+    "git commit -q -F - <<'EOF'\nfix(sql): wait for the call\n\nkubectl; az && sql\nEOF",
+    'git commit -F - <<"EOF"\nfix(sql): $(kubectl x)\nEOF',
+    "cat <<\\EOF\n`kubectl x`\nEOF",
+    "cat <<EOF\nfix(sql): kubectl `date`\nEOF",
+    "echo ${sql} ${a:-kubectl} $[sql + 1] ${a:-\"sql\"} ${a:-'sql'}",
+    "cat >f <<'END-1.x'\nkubectl get pods\nEND-1.x\necho done",
+    "cat <<'EOF'\nE\\\nOF\nkubectl get pods\nEOF",
     "",
 ]
 
@@ -349,6 +378,42 @@ def test_split_commands() -> None:
     assert hook.split_commands("echo $(a b) c") == [["a", "b"], ["echo", "", "c"]]
     assert hook.split_commands("a `b c` d") == [["b", "c"], ["a", "", "d"]]
     assert hook.split_commands("a # b\nc") == [["a"], ["c"]]
+
+
+def test_split_commands_skips_heredoc_bodies() -> None:
+    split = hook.split_commands
+    assert split("git commit -F - <<'EOF'\nfix(sql): x\nEOF\necho done") == [
+        ["git", "commit", "-F", "-"],
+        ["echo", "done"],
+    ]
+    # `<<-` strips leading tabs from the delimiter line only.
+    assert split("cat <<-EOF\n\ta\n\tEOF\nb") == [["cat"], ["b"]]
+    # Two heredocs on one line: their bodies follow in order.
+    assert split("cat <<A <<'B'\nB\nA\nA\nB\nc") == [["cat"], ["c"]]
+    # An expanded body runs its substitutions; the rest of it is data.
+    assert split("cat <<EOF >f\nx $(a b) y\nEOF") == [["cat", ">f"], ["a", "b"]]
+    # A heredoc in a pipeline; the body starts after the line.
+    assert split("cat <<EOF | grep x\nkubectl\nEOF") == [["cat"], ["grep", "x"]]
+    # The delimiter line is found line by line, before any substitution is parsed; in an expanded
+    # body a backslash-newline joins two lines first.
+    assert split("cat <<EOF\n$(a '\nEOF\nb") == [["cat"], ["a", '"'], ["b"]]
+    assert split("cat <<EOF\nx\\\nEOF\n$(a)\nEOF\nb") == [["cat"], ["a"], ["b"]]
+    assert split("cat <<EOF\nE\\\nOF\nb") == [["cat"], ["b"]]
+    # A body without its delimiter line is read as commands, in case the `<<` was misread.
+    assert split("cat <<'EOF'\nkubectl") == [["cat"], ["kubectl"]]
+    # In arithmetic `<<` is a shift.
+    assert split("echo $((1<<2))\nb") == [["1<<2"], ["echo", ""], ["b"]]
+    assert split("((x = 1 << 2))\nb") == [["x", "=", "1", "<<", "2"], [""], ["b"]]
+    assert split("for ((i = 1 << 2; ;))\nb")[-1] == ["b"]
+    # `${ }` and `$[ ]` are word text, with their substitutions as commands.
+    assert split("echo ${x:-a<<b} $[1<<2]\nc") == [["echo", "${x:-a<<b}", "$[1<<2]"], ["c"]]
+    assert split("echo ${x:-${y}$(a)}z") == [["a"], ["echo", "${x:-${y}}z"]]
+    # A `<<` not after a separator, or a delimiter that is not a plain word: the shell may read
+    # it differently, so the bodies are checked as commands too.
+    assert split("cat<<'EOF'\nk\nEOF") == [["cat"], ["k"], ["EOF"]]
+    assert split("cat <<'E F'\nk\nE F") == [["cat"], ["k"], ["E", "F"]]
+    # A here-string has no body.
+    assert split("cat <<<'a b'\nc") == [["cat", "<<<a b"], ["c"]]
 
 
 def test_the_script_runs_under_isolated_python(setup: Setup) -> None:

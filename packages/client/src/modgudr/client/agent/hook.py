@@ -6,7 +6,8 @@ self-contained file: it runs on the macOS Command Line Tools Python 3.9 (no `mat
 types at run time, no 3.10+ stdlib API), imports only the standard library and never `modgudr`.
 
 It reads the PreToolUse JSON from stdin and takes `tool_input.command`. The command is split shell-
-aware (quotes respected) on `;`, `&&`, `||`, `|`, `&`, newlines, `$( )` and backticks. Leading
+aware (quotes respected) on `;`, `&&`, `||`, `|`, `&`, newlines, `$( )` and backticks; a heredoc
+body is data, apart from the `$( )` and backticks of an unquoted delimiter's body. Leading
 assignments and the wrappers `timeout`, `time`, `nice`, `nohup`, `stdbuf`, `command`, `builtin`,
 `noglob`, `xargs`, `env` and `sudo` are stripped. The hook blocks (exit 2, the reason on stderr)
 when the first word's basename is one of `BLOCKED_TOOLS`, or when `curl`, `wget` or `http` names a
@@ -74,6 +75,13 @@ def split_commands(command: str) -> list[list[str]]:
     Separators outside quotes end a command; `$(` and a backtick start a nested command even
     inside double quotes, after which the enclosing command resumes. Quoted text stays inside its
     word, so `echo "a; kubectl"` is one command.
+
+    A heredoc body (`<<WORD`, `<<-WORD`) is data, up to its delimiter line, found line by line as
+    the shell does. With a quoted delimiter (`<<'EOF'`) the body is skipped; otherwise only its
+    `$( )` and backticks are commands. A body with no delimiter line is read as commands instead.
+    `<<` in `$(( ))`, `(( ))`, `$[ ]` or `${ }` does not start a heredoc. Bodies are skipped only
+    when the `<<` follows a space or a separator and the delimiter is a plain word; otherwise they
+    are read as commands too.
     """
     commands: list[list[str]] = []
     words: list[str] = []
@@ -82,7 +90,19 @@ def split_commands(command: str) -> list[list[str]]:
     # What an enclosing context left behind when a `$(` or a backtick opened:
     # (opener, quote state, words, the word in progress, whether a word is in progress).
     stack: list[tuple[str, str, list[str], list[str], bool]] = []
+    # The quote state is "", "'" or '"', or "{" or "[" inside `${ }` or `$[ ]`.
     quote = ""
+    # Heredocs whose bodies start after the next newline: (delimiter, strip tabs, expanded).
+    pending: list[tuple[str, bool, bool]] = []
+    # Where the first and the latest run of heredoc bodies start.
+    first_body = -1
+    bodies_from = 0
+    # Set when a `<<` might not be a heredoc as the shell reads it; the bodies are then checked.
+    unsure = False
+    # Set when a heredoc never reaches its delimiter line.
+    unterminated = False
+    # The brace or bracket depth inside `${ }` or `$[ ]` (quote "{" or "[").
+    depth = 0
     i = 0
     n = len(command)
 
@@ -138,6 +158,10 @@ def split_commands(command: str) -> list[list[str]]:
                 open_context("`")
             i += 1
             continue
+        if c == "$" and command.startswith("$((", i):
+            open_context(_ARITH)
+            i += 3
+            continue
         if c == "$" and command.startswith("$(", i):
             open_context("(")
             i += 2
@@ -149,6 +173,33 @@ def split_commands(command: str) -> list[list[str]]:
                 word.append(c)
             i += 1
             continue
+        if quote in ("{", "["):
+            # Inside `${ }` or `$[ ]`: word text, with only `$( )` and backticks as commands.
+            # A quoted string in it is stepped over whole; the substitutions in a double-quoted
+            # one are still commands. The quoting is not tracked exactly, so the bodies of any
+            # heredoc are checked too.
+            if c in "'\"":
+                unsure = True
+                end = command.find(c, i + 1)
+                while c == '"' and end > 0 and command[end - 1] == "\\":
+                    end = command.find(c, end + 1)
+                end = n - 1 if end < 0 else end
+                segment = command[i : end + 1]
+                if c == '"':
+                    # The last command is the string itself, as one word.
+                    commands.extend(split_commands(segment)[:-1])
+                word.append(segment)
+                i = end + 1
+                continue
+            if c == quote:
+                depth += 1
+            elif c == _CLOSER[quote]:
+                depth -= 1
+                if depth <= 0:
+                    quote = ""
+            word.append(c)
+            i += 1
+            continue
         if c in "'\"":
             quote = c
             in_word = True
@@ -158,8 +209,60 @@ def split_commands(command: str) -> list[list[str]]:
             close_context()
             i += 1
             continue
+        if c == ")" and stack and stack[-1][0] == _ARITH and command.startswith("))", i):
+            close_context()
+            i += 2
+            continue
+        if c == "$" and command[i + 1 : i + 2] in ("{", "["):
+            quote = command[i + 1]
+            depth = 1
+            word.append(command[i : i + 2])
+            in_word = True
+            i += 2
+            continue
+        # `((` is arithmetic where a command starts, also after a keyword: `for ((`, `if ((`.
+        if (
+            c == "("
+            and command.startswith("((", i)
+            and not in_word
+            and all(w in _KEYWORDS for w in words)
+        ):
+            open_context(_ARITH)
+            i += 2
+            continue
+        if c == "<" and command.startswith("<<<", i):
+            word.append("<<<")
+            in_word = True
+            i += 3
+            continue
+        # In arithmetic `<<` is a shift, not a heredoc.
+        if c == "<" and command.startswith("<<", i) and not (stack and stack[-1][0] == _ARITH):
+            end_word()
+            previous = command[i - 1] if i > 0 else ""
+            i, heredoc = _heredoc(command, i + 2)
+            if heredoc is not None:
+                pending.append(heredoc)
+                # Sure only of `<<` after a separator, with a plain delimiter word: anything
+                # else (`a[1<<2]`, `<<${x}`) may be read differently by the shell.
+                after = command[i] if i < n else ""
+                if (
+                    previous not in _BEFORE_HEREDOC
+                    or not _PLAIN_DELIMITER.fullmatch(heredoc[0])
+                    or (after != "" and after in "()")
+                ):
+                    unsure = True
+            continue
         if c in " \t":
             end_word()
+        elif c == "\n" and pending:
+            end_command()
+            bodies_from = i + 1
+            if first_body < 0:
+                first_body = bodies_from
+            i, complete = _read_bodies(command, bodies_from, pending, commands)
+            pending.clear()
+            unterminated = unterminated or not complete
+            continue
         elif c in "\n;|()":
             end_command()
         elif c == "&":
@@ -181,7 +284,99 @@ def split_commands(command: str) -> list[list[str]]:
     while stack:
         close_context()
     end_command()
+    # A `<<` the shell may read differently, or a heredoc that never reaches its delimiter line,
+    # may have hidden commands: check the text after it as commands, which can only block more.
+    if unsure and first_body >= 0:
+        commands.extend(split_commands(command[first_body:]))
+    elif unterminated:
+        commands.extend(split_commands(command[bodies_from:]))
     return commands
+
+
+def _read_bodies(
+    command: str, start: int, heredocs: Sequence[tuple[str, bool, bool]], commands: list[list[str]]
+) -> tuple[int, bool]:
+    """Read the bodies of `heredocs` in order from `start`, line by line as the shell does, and
+    add the `$( )` and backtick commands of the expanded ones to `commands`. Returns the index
+    after the last delimiter line, and False when a body runs to the end without one."""
+    pos = start
+    n = len(command)
+    for delimiter, strip_tabs, expanded in heredocs:
+        lines: list[str] = []
+        while True:
+            if pos >= n:
+                return n, False
+            end = command.find("\n", pos)
+            end = n if end < 0 else end
+            line = command[pos:end]
+            # In an expanded body a backslash-newline joins two lines, also before the check.
+            while expanded and (len(line) - len(line.rstrip("\\"))) % 2 == 1 and end < n:
+                following = command.find("\n", end + 1)
+                following = n if following < 0 else following
+                line = line[:-1] + command[end + 1 : following]
+                end = following
+            pos = end + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+            lines.append(line)
+        if expanded:
+            # The body as a double-quoted word: its substitutions are commands, the rest is data.
+            # Its own double quotes become single ones, which a double-quoted word keeps as text.
+            body = "\n".join(lines).replace('"', "'")
+            commands.extend(split_commands(f'"{body}"')[:-1])
+    return pos, True
+
+
+#: The opener of an arithmetic context, `$((` or a `((` command.
+_ARITH = "(("
+#: The closing character of `${ }` and the old arithmetic `$[ ]`, by their opening one.
+_CLOSER = {"{": "}", "[": "]"}
+#: The characters after which a `<<` is surely a heredoc ("" is the start of the line).
+_BEFORE_HEREDOC = ("", " ", "\t", "\n", ";", "|", "&")
+#: A delimiter word whose body is skipped; any other delimiter's body is checked.
+_PLAIN_DELIMITER = re.compile(r"[A-Za-z0-9_.-]+")
+#: The reserved words that can stand before a `((` command.
+_KEYWORDS = frozenset(
+    {"for", "if", "elif", "while", "until", "then", "else", "do", "!", "time", "{"}
+)
+
+
+def _heredoc(command: str, start: int) -> tuple[int, tuple[str, bool, bool] | None]:
+    """The delimiter word after a `<<` at `start`: the index after it, and (the delimiter with
+    quotes removed, whether `<<-` strips leading tabs, whether the body is expanded). None when
+    there is no word."""
+    i = start
+    n = len(command)
+    strip_tabs = command.startswith("-", i)
+    if strip_tabs:
+        i += 1
+    while i < n and command[i] in " \t":
+        i += 1
+    delimiter: list[str] = []
+    quoted = False
+    quote = ""
+    while i < n:
+        c = command[i]
+        if quote:
+            if c == quote:
+                quote = ""
+            else:
+                delimiter.append(c)
+        elif c in "'\"":
+            quote = c
+            quoted = True
+        elif c == "\\" and i + 1 < n:
+            quoted = True
+            i += 1
+            delimiter.append(command[i])
+        elif c in " \t\n;|&()<>":
+            break
+        else:
+            delimiter.append(c)
+        i += 1
+    if not delimiter and not quoted:
+        return i, None
+    return i, ("".join(delimiter), strip_tabs, not quoted)
 
 
 # --- wrappers ------------------------------------------------------------------------------------
