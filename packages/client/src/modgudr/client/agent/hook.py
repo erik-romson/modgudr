@@ -21,8 +21,9 @@ The Write, Edit, MultiEdit and NotebookEdit tools are refused (exit 2) when thei
 The Bash steering is best-effort and fails open: it is steering, not a boundary. An internal error
 there writes one line to stderr and exits 0; `onFailure: "block"` in the settings already covers a
 hook that cannot start. Known miss, on purpose: the hook can be bypassed with `bash -c "kubectl …"`,
-`eval`, a script file or any other indirection it does not parse. The sandbox and the deny rules of
-the managed settings are the boundary, not this hook.
+`eval`, a script file, a heredoc fed to a shell (`bash <<'EOF'`, whose body is data to the hook) or
+any other indirection it does not parse. The sandbox and the deny rules of the managed settings are
+the boundary, not this hook.
 
 The file-tool branch fails closed: a missing, empty or non-string path, or any error while
 deciding, blocks the call.
